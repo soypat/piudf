@@ -5,17 +5,22 @@ import (
 	"math"
 )
 
-// tokval is a token with its literal already converted to a Value, since
-// lexer literals are only valid until the next NextToken call.
+// tokval is a token with its literal already converted to a Value.
 type tokval struct {
 	val Value
+	// lit aliases the lexer's literal buffer for TokName tokens. It is
+	// valid until the lexer produces its next literal-bearing token; the
+	// pushback queue holds at most one literal-bearing token (the most
+	// recently lexed), so a popped lit is always still intact.
+	lit []byte
 	pos Pos
 	tok Token
 }
 
 // next returns the next token as a tokval, honoring the pushback queue.
-// Names intern into p's arena; other conversions are self-contained.
-func (d *Decoder) next(p *PDF) (tokval, error) {
+// Span-kind tokens (strings, names) convert to file-coordinate Values;
+// nothing is copied or interned.
+func (d *Decoder) next() (tokval, error) {
 	if d.npb > 0 {
 		d.npb--
 		return d.pb[d.npb], nil
@@ -42,24 +47,12 @@ func (d *Decoder) next(p *PDF) (tokval, error) {
 		}
 		tv.val = Value{Kind: KindReal, I: int64(math.Float64bits(f))}
 	case TokName:
-		ref, err := p.names.intern(lit)
-		if err != nil {
-			p.stats.Dropped++
-			return tv, fmt.Errorf("%w: interning name at %v", ErrMemoryLimit, pos)
-		}
-		tv.val = Value{Kind: KindName, Name: ref}
-	case TokString, TokHexString:
-		// Store the raw payload span; unescaped bytes are re-lexed on
-		// demand by AppendString. Payload sits between the delimiters.
-		kind := KindString
-		if tok == TokHexString {
-			kind = KindHexString
-		}
-		rawLen := int64(d.lx.Pos()) - int64(pos) - 2
-		if rawLen < 0 {
-			rawLen = 0
-		}
-		tv.val = Value{Kind: kind, I: int64(pos) + 1, N: uint32(rawLen)}
+		tv.val = Value{Kind: KindName, I: int64(pos), N: spanLen(pos, d.lx.Pos())}
+		tv.lit = lit
+	case TokString:
+		tv.val = Value{Kind: KindString, I: int64(pos), N: spanLen(pos, d.lx.Pos())}
+	case TokHexString:
+		tv.val = Value{Kind: KindHexString, I: int64(pos), N: spanLen(pos, d.lx.Pos())}
 	case TokTrue:
 		tv.val = Value{Kind: KindBool, I: 1}
 	case TokFalse:
@@ -70,32 +63,37 @@ func (d *Decoder) next(p *PDF) (tokval, error) {
 	return tv, nil
 }
 
+// spanLen returns the raw byte length of the token spanning [start, end).
+func spanLen(start, end Pos) uint32 {
+	if end < start {
+		return 0
+	}
+	return uint32(end - start)
+}
+
 // unread pushes tv back; up to len(d.pb) tokens may be pending.
 func (d *Decoder) unread(tv tokval) {
 	d.pb[d.npb] = tv
 	d.npb++
 }
 
-// parseNext parses the next complete PDF object from the token stream into
-// a Value backed by p's arena. Composites are assembled on d.stack and
-// moved into p.values when closed, so a composite's elements are contiguous.
-func (d *Decoder) parseNext(p *PDF, depth int) (Value, error) {
-	if depth > p.lim.MaxParseDepth {
-		return Value{}, fmt.Errorf("%w: nesting deeper than %d", ErrMemoryLimit, p.lim.MaxParseDepth)
-	}
-	tv, err := d.next(p)
+// parseShallow parses the next complete PDF object into a Value without
+// descending into composites: dictionaries and arrays are skipped at token
+// level and returned as raw file spans. No recursion, no memory.
+func (d *Decoder) parseShallow() (Value, error) {
+	tv, err := d.next()
 	if err != nil {
 		return Value{}, err
 	}
 	switch tv.tok {
 	case TokInt:
 		// Lookahead for an indirect reference: <int> <int> R.
-		tv2, err := d.next(p)
+		tv2, err := d.next()
 		if err != nil {
 			return Value{}, err
 		}
 		if tv2.tok == TokInt {
-			tv3, err := d.next(p)
+			tv3, err := d.next()
 			if err != nil {
 				return Value{}, err
 			}
@@ -111,55 +109,16 @@ func (d *Decoder) parseNext(p *PDF, depth int) (Value, error) {
 	case TokReal, TokName, TokString, TokHexString, TokTrue, TokFalse, TokNull:
 		return tv.val, nil
 
-	case TokArrayOpen:
-		stackStart := len(d.stack)
-		for {
-			nt, err := d.next(p)
-			if err != nil {
-				return Value{}, err
-			}
-			if nt.tok == TokArrayClose {
-				break
-			}
-			if nt.tok == TokEOF {
-				return Value{}, &SyntaxError{Off: nt.pos, Msg: "unterminated array"}
-			}
-			d.unread(nt)
-			v, err := d.parseNext(p, depth+1)
-			if err != nil {
-				return Value{}, err
-			}
-			if err := d.pushStack(p, v); err != nil {
-				return Value{}, err
-			}
+	case TokDictOpen, TokArrayOpen:
+		end, err := d.skipComposite(tv.pos)
+		if err != nil {
+			return Value{}, err
 		}
-		return d.closeComposite(p, KindArray, stackStart, 1)
-
-	case TokDictOpen:
-		stackStart := len(d.stack)
-		for {
-			nt, err := d.next(p)
-			if err != nil {
-				return Value{}, err
-			}
-			if nt.tok == TokDictClose {
-				break
-			}
-			if nt.tok != TokName {
-				return Value{}, &SyntaxError{Off: nt.pos, Msg: "expected name as dictionary key"}
-			}
-			v, err := d.parseNext(p, depth+1)
-			if err != nil {
-				return Value{}, err
-			}
-			if err := d.pushStack(p, nt.val); err != nil {
-				return Value{}, err
-			}
-			if err := d.pushStack(p, v); err != nil {
-				return Value{}, err
-			}
+		kind := KindDict
+		if tv.tok == TokArrayOpen {
+			kind = KindArray
 		}
-		return d.closeComposite(p, KindDict, stackStart, 2)
+		return Value{Kind: kind, I: int64(tv.pos), N: spanLen(tv.pos, end)}, nil
 
 	case TokEOF:
 		return Value{}, &SyntaxError{Off: tv.pos, Msg: "unexpected end of input"}
@@ -167,37 +126,33 @@ func (d *Decoder) parseNext(p *PDF, depth int) (Value, error) {
 	return Value{}, &SyntaxError{Off: tv.pos, Msg: "unexpected token " + tv.tok.String()}
 }
 
-// pushStack adds a pending composite element, enforcing p's arena budget:
-// stack elements are counted because they move verbatim into the arena.
-func (d *Decoder) pushStack(p *PDF, v Value) error {
-	if !p.lim.Grow && len(p.values)+len(d.stack) >= p.lim.ValueArena {
-		p.stats.Dropped++
-		return fmt.Errorf("%w: value arena capacity %d", ErrMemoryLimit, p.lim.ValueArena)
+// skipComposite scans past the body of a composite whose opening token
+// (starting at start) was already consumed, and returns the offset just
+// past the matching close. The scan is token-level so parentheses, strings
+// and comments cannot fool the nesting count. Cost is a bounded counter;
+// no memory is consumed regardless of nesting.
+func (d *Decoder) skipComposite(start Pos) (end Pos, err error) {
+	depth := 1
+	for {
+		tv, err := d.next()
+		if err != nil {
+			return 0, err
+		}
+		switch tv.tok {
+		case TokDictOpen, TokArrayOpen:
+			depth++
+			if depth > d.maxDepth {
+				return 0, fmt.Errorf("%w: nesting deeper than %d at %v", ErrCorrupt, d.maxDepth, tv.pos)
+			}
+		case TokDictClose, TokArrayClose:
+			depth--
+			if depth == 0 {
+				return d.lx.Pos(), nil
+			}
+		case TokEOF:
+			return 0, &SyntaxError{Off: start, Msg: "unterminated dictionary or array"}
+		}
 	}
-	d.stack = append(d.stack, v)
-	return nil
-}
-
-// closeComposite moves the elements accumulated since stackStart into p's
-// values arena and returns the composite Value spanning them. perElem is 1
-// for arrays and 2 for dictionaries (key+value pairs).
-func (d *Decoder) closeComposite(p *PDF, kind Kind, stackStart, perElem int) (Value, error) {
-	n := len(d.stack) - stackStart
-	start := len(p.values)
-	p.values = append(p.values, d.stack[stackStart:]...)
-	d.stack = d.stack[:stackStart]
-	if hw := len(p.values) + len(d.stack); hw > p.stats.ValuesHighWater {
-		p.stats.ValuesHighWater = hw
-	}
-	return Value{Kind: kind, I: int64(start), N: uint32(n / perElem)}, nil
-}
-
-// resetScratch recycles the machine scratch and p's per-parse arena.
-// Interned names persist.
-func (d *Decoder) resetScratch(p *PDF) {
-	p.values = p.values[:0]
-	d.stack = d.stack[:0]
-	d.npb = 0
 }
 
 // atoiSigned parses an optionally signed decimal integer.

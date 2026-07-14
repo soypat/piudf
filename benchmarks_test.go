@@ -26,7 +26,7 @@ func loadFile(tb testing.TB, path string) (*Decoder, *PDF, []byte, []objloc) {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	sizeV, err := p.DictGet(tr, "Size")
+	sizeV, err := d.DictGet(r, tr, "Size")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestEmbeddedPDFResolveAll(t *testing.T) {
 		}
 		kinds[v.Kind]++
 	}
-	t.Logf("%d objects: %v, values high water %d", len(locs), kinds, p.Stats().ValuesHighWater)
+	t.Logf("%d objects: %v", len(locs), kinds)
 }
 
 // BenchmarkDecodeInit measures trailer plus cross-reference chain parsing,
@@ -170,7 +170,7 @@ func BenchmarkResolveCatalog(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := p.DictGet(v, "Pages"); err != nil {
+		if _, err := d.DictGet(r, v, "Pages"); err != nil {
 			b.Fatal(err)
 		}
 	}

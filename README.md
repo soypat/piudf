@@ -4,49 +4,47 @@ Lazy, memory-constrained PDF decoder for Go, driven entirely by `io.ReaderAt`.
 
 piudf records file offsets instead of contents and parses indirect objects on
 demand. It works identically over an in-memory buffer (`bytes.Reader`) or a
-file of arbitrary size (`os.File`): memory use is bounded by `Limits` you set
-at decode time, independent of document size.
+file of arbitrary size (`os.File`): memory use is independent of document
+size.
 
 ## Design
 
+**Values are file coordinates.** A `Value` is either an inline scalar
+(int, real, bool, null, reference) or the `{offset, length}` of its raw text
+in the file (strings, names, dictionaries, arrays, streams). Composite and
+text access re-lexes the span on demand — there is no object graph, no arena
+and no cache. A Value never goes stale: it stays usable for as long as a
+reader over the identical file bytes exists, across any number of other
+operations or documents.
+
 Two types split the work:
 
-- **`PDF`** — the lazily decoded state of one document. Owns all
-  per-document memory (xref sections, name arena, value arena); slice
-  capacity bounds allocation, length is usage, element types hold no
-  pointers. A PDF references neither the file nor the Decoder: decode,
-  close the file, keep the struct, and hand a reader over the identical
-  bytes back to lazy methods later.
-- **`Decoder`** — the reusable machine (lexer, parse scratch, ~5 KB
-  bounded). Decodes into PDF structs without retaining them; its memory
+- **`PDF`** — the lazy index of one document: cross-reference section
+  descriptors and trailer metadata, nothing else. Memory is O(number of
+  xref subsections) — ~32 B each, typically fewer than ten — regardless of
+  object count. A PDF references neither the file nor the Decoder.
+- **`Decoder`** — the reusable machine (lexer + token pushback, ~5 KB
+  bounded). Operates on PDF structs without retaining them; its memory
   stays constant no matter how many documents it processes.
 
-The `io.ReaderAt` is never stored. Methods that need the file take it
-explicitly — the signature tells you whether an operation touches the file
-(`d.Resolve(p, r, id)`) or only already-decoded state (`p.DictGet(v, name)`).
+The `io.ReaderAt` is never stored. Every operation that touches the file
+takes it explicitly: decode, close the file, keep the PDF struct and any
+Values, then reopen the same bytes later and keep reading.
 
-- **`io.ReaderAt` is the only data abstraction.** The decoder never buffers
-  the document. Derived readers (raw stream payloads via `io.SectionReader`,
-  later: decoded streams, concatenated page content) nest over the same
-  interface.
 - **The cross-reference table is not materialized.** Classic xref tables are
   already random-access arrays of fixed 20-byte records on disk, so the
-  decoder stores only one ~32 B descriptor per xref subsection and reads
-  single records with `ReadAt` on lookup. A 10-object file and a 10-million
-  object file cost the same memory.
-- **Pure lazy resolution.** `Resolve` re-parses the object on every call into
-  a preallocated arena that is recycled per call. Values are flat tagged
-  unions (no pointers, no interfaces); composites are spans into the arena,
-  strings are file-offset spans read on demand, names are interned once into
-  a flat byte arena.
-- **Soft degradation, never a crash.** With `Limits.Grow` disabled the
-  decoder allocates nothing after `Decode`. An operation that would exceed a
-  limit fails with `ErrMemoryLimit` and the decoder remains usable —
-  scalars still resolve after a huge dictionary was refused.
+  decoder stores only one descriptor per xref subsection and reads single
+  records with `ReadAt` on lookup.
+- **Resolution is shallow.** `Resolve` parses scalars inline and returns
+  composites as raw spans; `DictGet`/`ArrayIndex` scan the raw text of one
+  span per call (~µs). Cost lives at access time, not decode time.
+- **Soft degradation, never a crash.** Operations that would exceed
+  `DecodeLimits` fail with `ErrMemoryLimit` while everything else keeps
+  working. With `Grow` false nothing allocates after `Decode`.
 - **Compressed payloads are never decoded.** `RawStream` exposes the raw
   bytes and the declared `/Filter`; decoding is the caller's decision.
-  (A `Filter` interface for the structural minimum — FlateDecode for xref and
-  object streams — is the next stage.)
+  (A `Filter` interface for the structural minimum — FlateDecode for xref
+  and object streams — is the next stage.)
 
 ## Usage
 
@@ -55,27 +53,31 @@ f, _ := os.Open("doc.pdf")
 st, _ := f.Stat()
 
 var d piudf.Decoder // reusable machine
-var p piudf.PDF     // document state, user-owned memory
+var p piudf.PDF     // per-document lazy index
 err := d.Decode(&p, f, st.Size(), piudf.DecodeLimits{
-	ValueArena: 512, NameArena: 2048, MaxLiteral: 4096, MaxParseDepth: 16,
-	Grow: false, // hard memory bound; use DefaultDecodeLimits() to grow freely
+	MaxLiteral: 4096, MaxParseDepth: 16, MaxXrefSections: 16,
+	Grow: false, // hard bound; use DefaultDecodeLimits() to grow freely
 })
 if err != nil { /* ... */ }
-// p holds no reference to f: you may close f here and reopen the same
-// bytes later for the lazy calls below.
+// Neither p nor any Value references f: close and reopen the same bytes
+// whenever you like.
 
-catalog, err := d.Resolve(&p, f, p.Root())
-pages, err := p.DictGet(catalog, "Pages") // no file needed
-pagesDict, err := d.Resolve(&p, f, pages.Ref)
-// Values are valid until the next Resolve/Trailer/Decode into that PDF.
+catalog, _ := d.Resolve(&p, f, p.Root())
+pages, _ := d.DictGet(f, catalog, "Pages")   // re-lexes the dict span
+pagesDict, _ := d.Resolve(&p, f, pages.Ref)
+kids, _ := d.DictGet(f, pagesDict, "Kids")
+first, _ := d.ArrayIndex(f, kids, 0)
+// Values are plain file coordinates: store them, they never go stale.
 
-sv, _ := d.Resolve(&p, f, contentsID)
-r, info, _ := d.RawStream(&p, f, sv) // *io.SectionReader over raw payload + filter name
+sv, _ := d.Resolve(&p, f, first.Ref)
+r, info, _ := d.RawStream(&p, f, sv) // *io.SectionReader over raw payload
+_ = d.NameIs(f, info.Filter, "FlateDecode")
 ```
 
 `Decode` parses only the trailer and cross-reference chain; no object
 contents are touched. Resolving an object costs one xref record `ReadAt`
-plus lexing that object — and zero heap allocations once buffers are warm.
+plus a shallow lex of that object — zero heap allocations once buffers are
+warm, including `DictGet` and `NameIs`.
 
 ## Status / roadmap
 

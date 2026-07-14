@@ -41,29 +41,27 @@ const (
 	KindRef                   // ref
 )
 
-// Value is a flat tagged union representing any PDF object. It contains no
-// pointers: composite values (arrays, dictionaries) reference spans of a
-// Decoder-owned arena and string payloads reference file offsets, read on
-// demand. A Value is only meaningful together with the Decoder that produced
-// it and only until the next call to Resolve on that Decoder.
+// Value represents any PDF object as either an inline scalar or a raw file
+// span. It is a set of file coordinates: producing a Value reads no object
+// data beyond its extent, and a Value never goes stale — it stays usable
+// for as long as a reader over the identical file bytes is available.
+// Composite and text Values are accessed by re-lexing their span on demand
+// via the Decoder methods (DictGet, ArrayIndex, AppendString, ...).
 type Value struct {
-	// I holds the integer value (KindInt), bool value 0/1 (KindBool),
-	// float bits (KindReal), absolute file offset of the raw payload
-	// (KindString, KindHexString), or arena span start (KindArray,
-	// KindDict, KindStream).
+	// I holds the scalar payload for KindInt (value), KindBool (0/1) and
+	// KindReal (float bits). For span kinds (KindString, KindHexString,
+	// KindName, KindArray, KindDict, KindStream) it is the absolute file
+	// offset of the first token byte, opening delimiter included:
+	// '(', '<', '/', '[' or '<<'. KindStream spans the stream dictionary.
 	I int64
-	// N holds the payload byte length (strings) or span element count
-	// (arrays, dicts).
+	// N is the raw byte length of the full token span, closing delimiter
+	// included. Zero for scalar kinds.
 	N    uint32
-	Ref  ObjectID // Referenced object for KindRef; owning stream dict info for KindStream unused in core.
-	Name NameRef  // Interned name for KindName.
+	Ref  ObjectID // Referenced object for KindRef; zero otherwise.
 	Kind Kind
 }
 
-var (
-	errKindMismatch = errors.New("piudf: value kind mismatch")
-	errNotComposite = errors.New("piudf: value is not array or dict")
-)
+var errKindMismatch = errors.New("piudf: value kind mismatch")
 
 // Bool returns the boolean contained in v.
 func (v Value) Bool() (bool, error) {
@@ -99,21 +97,11 @@ func (v Value) IsRef() bool { return v.Kind == KindRef }
 // IsNull reports whether v is the PDF null object or an invalid Value.
 func (v Value) IsNull() bool { return v.Kind == KindNull || v.Kind == KindInvalid }
 
-// Len returns the number of elements for arrays, the number of key-value
-// pairs for dicts and stream dicts, and the payload byte length for strings.
-func (v Value) Len() int {
+// isSpan reports whether v addresses a raw file span.
+func (v Value) isSpan() bool {
 	switch v.Kind {
-	case KindArray, KindDict, KindStream, KindString, KindHexString:
-		return int(v.N)
+	case KindString, KindHexString, KindName, KindArray, KindDict, KindStream:
+		return true
 	}
-	return 0
-}
-
-// span returns the arena span of a composite value.
-func (v Value) span() (start, n int, err error) {
-	switch v.Kind {
-	case KindArray, KindDict, KindStream:
-		return int(v.I), int(v.N), nil
-	}
-	return 0, 0, errNotComposite
+	return false
 }

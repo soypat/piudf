@@ -185,6 +185,10 @@ func (d *Decoder) readXrefTable(p *PDF, r io.ReaderAt, off int64) (prev int64, e
 			lx.skipWhitespace()
 			recOff := int64(lx.Pos())
 			if count > 0 {
+				if !p.lim.Grow && len(p.sections) >= p.lim.MaxXrefSections {
+					p.stats.Dropped++
+					return 0, fmt.Errorf("%w: more than %d xref subsections", ErrMemoryLimit, p.lim.MaxXrefSections)
+				}
 				p.sections = append(p.sections, xrefSection{
 					firstObj: uint32(first),
 					count:    uint32(count),
@@ -208,8 +212,8 @@ func (d *Decoder) readXrefTable(p *PDF, r io.ReaderAt, off int64) (prev int64, e
 // trailer offset in p for lazy re-parsing. Returns /Prev or 0.
 func (d *Decoder) readTrailer(p *PDF, r io.ReaderAt) (prev int64, err error) {
 	trailerOff := int64(d.lx.Pos())
-	d.resetScratch(p)
-	v, err := d.parseNext(p, 0)
+	d.npb = 0
+	v, err := d.parseShallow()
 	if err != nil {
 		return 0, fmt.Errorf("parsing trailer at %#x: %w", trailerOff, err)
 	}
@@ -219,18 +223,17 @@ func (d *Decoder) readTrailer(p *PDF, r io.ReaderAt) (prev int64, err error) {
 	if p.trailer.off == 0 {
 		p.trailer.off = trailerOff // Newest trailer wins for Trailer().
 	}
-	// Capture scalar metadata now: the values arena is scratch and this
-	// dict's span dies on the next parse.
-	if rv, err := p.DictGet(v, "Root"); err == nil && rv.IsRef() && p.trailer.root.IsZero() {
+	// Capture scalar metadata now so Root/Info/Size need no file later.
+	if rv, err := d.DictGet(r, v, "Root"); err == nil && rv.IsRef() && p.trailer.root.IsZero() {
 		p.trailer.root = rv.Ref
 	}
-	if rv, err := p.DictGet(v, "Info"); err == nil && rv.IsRef() && p.trailer.info.IsZero() {
+	if rv, err := d.DictGet(r, v, "Info"); err == nil && rv.IsRef() && p.trailer.info.IsZero() {
 		p.trailer.info = rv.Ref
 	}
-	if rv, err := p.DictGet(v, "Size"); err == nil && rv.Kind == KindInt && p.trailer.size == 0 {
+	if rv, err := d.DictGet(r, v, "Size"); err == nil && rv.Kind == KindInt && p.trailer.size == 0 {
 		p.trailer.size = rv.I
 	}
-	rv, err := p.DictGet(v, "Prev")
+	rv, err := d.DictGet(r, v, "Prev")
 	if err != nil {
 		return 0, err
 	}

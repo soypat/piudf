@@ -171,7 +171,7 @@ func (l *Lexer) NextToken() (tok Token, start Pos, literal []byte) {
 	case ch == '+' || ch == '-' || ch == '.' || isDigit(ch):
 		literal, tok, ok = l.readNumber()
 	case isRegular(ch):
-		literal = l.readIdent()
+		literal, ok = l.readIdent()
 		tok = Lookup(string(literal)) // Optimized by compiler to not allocate.
 	default:
 		l.errAt(start, "unexpected byte")
@@ -418,15 +418,17 @@ func (l *Lexer) readNumber() (lit []byte, tok Token, ok bool) {
 }
 
 // readIdent lexes a run of regular bytes (bare keyword candidates).
-func (l *Lexer) readIdent() []byte {
+// A truncated identifier fails the token: silently returning a prefix
+// would corrupt keyword recognition downstream.
+func (l *Lexer) readIdent() (lit []byte, ok bool) {
 	start := l.bufstart()
 	for l.chvalid && isRegular(l.ch) {
 		if !l.appendLit(start, l.ch) {
-			break
+			return l.idbuf[start:], false
 		}
 		l.advance()
 	}
-	return l.idbuf[start:]
+	return l.idbuf[start:], true
 }
 
 // appendLit appends b to the literal being built, honoring MaxLiteral.
