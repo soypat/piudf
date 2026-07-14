@@ -41,18 +41,18 @@ type xrefRecord struct {
 	kind   uint8
 }
 
-// lookupXref finds the newest cross-reference record for object num.
-// Sections are stored newest-revision-first so the first section containing
-// num shadows all older ones.
-func (d *Decoder) lookupXref(num uint32) (xrefRecord, error) {
-	rec := d.recbuf[:classicRecLen]
-	for i := range d.sections {
-		s := &d.sections[i]
+// lookupXref finds the newest cross-reference record for object num,
+// reading the record bytes from r. Sections are stored newest-revision-first
+// so the first section containing num shadows all older ones.
+func (p *PDF) lookupXref(r io.ReaderAt, num uint32) (xrefRecord, error) {
+	rec := p.recbuf[:classicRecLen]
+	for i := range p.sections {
+		s := &p.sections[i]
 		if num < s.firstObj || num >= s.firstObj+s.count {
 			continue
 		}
 		recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
-		n, err := d.r.ReadAt(rec, recOff)
+		n, err := r.ReadAt(rec, recOff)
 		if n != len(rec) {
 			return xrefRecord{}, fmt.Errorf("piudf: reading xref record %d/%d at %#x: %w", n, len(rec), recOff, err)
 		}
@@ -126,16 +126,16 @@ func findStartXref(r io.ReaderAt, size int64) (int64, error) {
 const maxXrefChain = 64
 
 // readXrefChain walks the cross-reference chain starting at the offset from
-// startxref, recording section descriptors and trailer metadata. Only
-// classic tables are supported; encountering a cross-reference stream
+// startxref, recording section descriptors and trailer metadata into p.
+// Only classic tables are supported; encountering a cross-reference stream
 // (PDF 1.5+) fails with ErrUnsupported.
-func (d *Decoder) readXrefChain(startOff int64) error {
+func (d *Decoder) readXrefChain(p *PDF, r io.ReaderAt, startOff int64) error {
 	off := startOff
 	for range maxXrefChain {
-		if off < 0 || off >= d.size {
+		if off < 0 || off >= p.size {
 			return fmt.Errorf("%w: xref offset %#x out of file bounds", ErrCorrupt, off)
 		}
-		prev, err := d.readXrefTable(off)
+		prev, err := d.readXrefTable(p, r, off)
 		if err != nil {
 			return err
 		}
@@ -151,10 +151,10 @@ func (d *Decoder) readXrefChain(startOff int64) error {
 }
 
 // readXrefTable parses one classic cross-reference table and its trailer at
-// off, appending section descriptors. Returns the /Prev offset or 0.
-func (d *Decoder) readXrefTable(off int64) (prev int64, err error) {
+// off, appending section descriptors to p. Returns the /Prev offset or 0.
+func (d *Decoder) readXrefTable(p *PDF, r io.ReaderAt, off int64) (prev int64, err error) {
 	lx := &d.lx
-	if err := lx.Reset(d.r, off); err != nil {
+	if err := lx.Reset(r, off); err != nil {
 		return 0, err
 	}
 	tok, pos, _ := lx.NextToken()
@@ -169,7 +169,7 @@ func (d *Decoder) readXrefTable(off int64) (prev int64, err error) {
 		tok, pos, lit := lx.NextToken()
 		switch tok {
 		case TokTrailer:
-			return d.readTrailer()
+			return d.readTrailer(p, r)
 		case TokInt:
 			first, ok := atoiFixed(lit)
 			if !ok {
@@ -185,7 +185,7 @@ func (d *Decoder) readXrefTable(off int64) (prev int64, err error) {
 			lx.skipWhitespace()
 			recOff := int64(lx.Pos())
 			if count > 0 {
-				d.sections = append(d.sections, xrefSection{
+				p.sections = append(p.sections, xrefSection{
 					firstObj: uint32(first),
 					count:    uint32(count),
 					fileOff:  recOff,
@@ -194,7 +194,7 @@ func (d *Decoder) readXrefTable(off int64) (prev int64, err error) {
 				})
 			}
 			// Jump over the fixed-width record area instead of tokenizing it.
-			if err := lx.Reset(d.r, recOff+classicRecLen*count); err != nil {
+			if err := lx.Reset(r, recOff+classicRecLen*count); err != nil {
 				return 0, err
 			}
 		default:
@@ -205,38 +205,38 @@ func (d *Decoder) readXrefTable(off int64) (prev int64, err error) {
 
 // readTrailer parses the trailer dictionary following the 'trailer' keyword
 // (lexer already positioned there) and records /Root, /Info, /Size and the
-// trailer offset for lazy re-parsing. Returns /Prev or 0.
-func (d *Decoder) readTrailer() (prev int64, err error) {
+// trailer offset in p for lazy re-parsing. Returns /Prev or 0.
+func (d *Decoder) readTrailer(p *PDF, r io.ReaderAt) (prev int64, err error) {
 	trailerOff := int64(d.lx.Pos())
-	d.resetScratch()
-	v, err := d.parseNext(0)
+	d.resetScratch(p)
+	v, err := d.parseNext(p, 0)
 	if err != nil {
 		return 0, fmt.Errorf("parsing trailer at %#x: %w", trailerOff, err)
 	}
 	if v.Kind != KindDict {
 		return 0, fmt.Errorf("%w: trailer is not a dictionary at %#x", ErrCorrupt, trailerOff)
 	}
-	if d.trailer.off == 0 {
-		d.trailer.off = trailerOff // Newest trailer wins for Trailer().
+	if p.trailer.off == 0 {
+		p.trailer.off = trailerOff // Newest trailer wins for Trailer().
 	}
 	// Capture scalar metadata now: the values arena is scratch and this
 	// dict's span dies on the next parse.
-	if r, err := d.DictGet(v, "Root"); err == nil && r.IsRef() && d.trailer.root.IsZero() {
-		d.trailer.root = r.Ref
+	if rv, err := p.DictGet(v, "Root"); err == nil && rv.IsRef() && p.trailer.root.IsZero() {
+		p.trailer.root = rv.Ref
 	}
-	if r, err := d.DictGet(v, "Info"); err == nil && r.IsRef() && d.trailer.info.IsZero() {
-		d.trailer.info = r.Ref
+	if rv, err := p.DictGet(v, "Info"); err == nil && rv.IsRef() && p.trailer.info.IsZero() {
+		p.trailer.info = rv.Ref
 	}
-	if r, err := d.DictGet(v, "Size"); err == nil && r.Kind == KindInt && d.trailer.size == 0 {
-		d.trailer.size = r.I
+	if rv, err := p.DictGet(v, "Size"); err == nil && rv.Kind == KindInt && p.trailer.size == 0 {
+		p.trailer.size = rv.I
 	}
-	r, err := d.DictGet(v, "Prev")
+	rv, err := p.DictGet(v, "Prev")
 	if err != nil {
 		return 0, err
 	}
-	switch r.Kind {
+	switch rv.Kind {
 	case KindInt:
-		return r.I, nil
+		return rv.I, nil
 	case KindNull:
 		return 0, nil
 	}

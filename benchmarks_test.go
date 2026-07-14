@@ -10,21 +10,23 @@ const embeddedPDF = "testdata/basis-of-embedded.pdf"
 
 // loadFile decodes the PDF at path and returns the decoder, the raw bytes
 // and the location of every live object in the file.
-func loadFile(tb testing.TB, path string) (*Decoder, []byte, []objloc) {
+func loadFile(tb testing.TB, path string) (*Decoder, *PDF, []byte, []objloc) {
 	tb.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		tb.Skipf("document unavailable: %v", err)
 	}
 	var d Decoder
-	if err := d.Decode(bytes.NewReader(data), int64(len(data)), Limits{}); err != nil {
+	var p PDF
+	r := bytes.NewReader(data)
+	if err := d.Decode(&p, r, int64(len(data)), DecodeLimits{}); err != nil {
 		tb.Fatal(err)
 	}
-	tr, err := d.Trailer()
+	tr, err := d.Trailer(&p, r)
 	if err != nil {
 		tb.Fatal(err)
 	}
-	sizeV, err := d.DictGet(tr, "Size")
+	sizeV, err := p.DictGet(tr, "Size")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func loadFile(tb testing.TB, path string) (*Decoder, []byte, []objloc) {
 	}
 	var locs []objloc
 	for num := uint32(1); num < uint32(size); num++ {
-		rec, err := d.lookupXref(num)
+		rec, err := p.lookupXref(r, num)
 		if err != nil || rec.kind != recNormal {
 			continue
 		}
@@ -43,7 +45,7 @@ func loadFile(tb testing.TB, path string) (*Decoder, []byte, []objloc) {
 	if len(locs) == 0 {
 		tb.Fatal("no objects found")
 	}
-	return &d, data, locs
+	return &d, &p, data, locs
 }
 
 type objloc struct {
@@ -74,28 +76,29 @@ func lexObject(tb testing.TB, lx *Lexer, r *bytes.Reader, off int64) (ntok int, 
 // TestEmbeddedPDFResolveAll sanity-checks the corpus the benchmarks use:
 // every object in the file must resolve.
 func TestEmbeddedPDFResolveAll(t *testing.T) {
-	d, _, locs := loadFile(t, embeddedPDF)
+	d, p, data, locs := loadFile(t, embeddedPDF)
+	r := bytes.NewReader(data)
 	kinds := make(map[Kind]int)
 	for _, loc := range locs {
-		v, err := d.Resolve(loc.id)
+		v, err := d.Resolve(p, r, loc.id)
 		if err != nil {
 			t.Fatalf("Resolve(%v): %v", loc.id, err)
 		}
 		kinds[v.Kind]++
 	}
-	t.Logf("%d objects: %v, values high water %d", len(locs), kinds, d.Stats().ValuesHighWater)
+	t.Logf("%d objects: %v, values high water %d", len(locs), kinds, p.Stats().ValuesHighWater)
 }
 
 // BenchmarkDecodeInit measures trailer plus cross-reference chain parsing,
 // the whole cost of opening a document (no object contents are read).
 func BenchmarkDecodeInit(b *testing.B) {
-	_, data, _ := loadFile(b, embeddedPDF)
+	_, p, data, _ := loadFile(b, embeddedPDF)
 	r := bytes.NewReader(data)
 	var d Decoder
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if err := d.Decode(r, int64(len(data)), Limits{}); err != nil {
+		if err := d.Decode(p, r, int64(len(data)), DecodeLimits{}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -104,7 +107,7 @@ func BenchmarkDecodeInit(b *testing.B) {
 // BenchmarkLexObjects measures pure lexing: every object's structural bytes
 // are tokenized, with no value conversion, interning, or tree assembly.
 func BenchmarkLexObjects(b *testing.B) {
-	_, data, locs := loadFile(b, embeddedPDF)
+	_, _, data, locs := loadFile(b, embeddedPDF)
 	r := bytes.NewReader(data)
 	var lx Lexer
 	lx.ReuseLiteralBuffer = true
@@ -130,7 +133,8 @@ func BenchmarkLexObjects(b *testing.B) {
 // sweep: xref record lookup, lexing, value conversion, name interning and
 // composite arena assembly for every object.
 func BenchmarkResolveObjects(b *testing.B) {
-	d, data, locs := loadFile(b, embeddedPDF)
+	d, p, data, locs := loadFile(b, embeddedPDF)
+	r := bytes.NewReader(data)
 	var structuralBytes int64
 	{
 		var lx Lexer
@@ -146,7 +150,7 @@ func BenchmarkResolveObjects(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for _, loc := range locs {
-			if _, err := d.Resolve(loc.id); err != nil {
+			if _, err := d.Resolve(p, r, loc.id); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -156,16 +160,17 @@ func BenchmarkResolveObjects(b *testing.B) {
 // BenchmarkResolveCatalog measures a single hot-object resolve: one xref
 // record ReadAt plus lexing and parsing of a small dictionary.
 func BenchmarkResolveCatalog(b *testing.B) {
-	d, _, _ := loadFile(b, embeddedPDF)
-	root := d.Root()
+	d, p, data, _ := loadFile(b, embeddedPDF)
+	r := bytes.NewReader(data)
+	root := p.Root()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		v, err := d.Resolve(root)
+		v, err := d.Resolve(p, r, root)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := d.DictGet(v, "Pages"); err != nil {
+		if _, err := p.DictGet(v, "Pages"); err != nil {
 			b.Fatal(err)
 		}
 	}

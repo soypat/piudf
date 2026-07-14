@@ -14,7 +14,8 @@ type tokval struct {
 }
 
 // next returns the next token as a tokval, honoring the pushback queue.
-func (d *Decoder) next() (tokval, error) {
+// Names intern into p's arena; other conversions are self-contained.
+func (d *Decoder) next(p *PDF) (tokval, error) {
 	if d.npb > 0 {
 		d.npb--
 		return d.pb[d.npb], nil
@@ -41,9 +42,9 @@ func (d *Decoder) next() (tokval, error) {
 		}
 		tv.val = Value{Kind: KindReal, I: int64(math.Float64bits(f))}
 	case TokName:
-		ref, err := d.names.intern(lit)
+		ref, err := p.names.intern(lit)
 		if err != nil {
-			d.stats.Dropped++
+			p.stats.Dropped++
 			return tv, fmt.Errorf("%w: interning name at %v", ErrMemoryLimit, pos)
 		}
 		tv.val = Value{Kind: KindName, Name: ref}
@@ -76,25 +77,25 @@ func (d *Decoder) unread(tv tokval) {
 }
 
 // parseNext parses the next complete PDF object from the token stream into
-// a Value. Composites are assembled on d.stack and moved to the d.values
-// arena when closed, so a composite's elements are contiguous.
-func (d *Decoder) parseNext(depth int) (Value, error) {
-	if depth > d.lim.MaxParseDepth {
-		return Value{}, fmt.Errorf("%w: nesting deeper than %d", ErrMemoryLimit, d.lim.MaxParseDepth)
+// a Value backed by p's arena. Composites are assembled on d.stack and
+// moved into p.values when closed, so a composite's elements are contiguous.
+func (d *Decoder) parseNext(p *PDF, depth int) (Value, error) {
+	if depth > p.lim.MaxParseDepth {
+		return Value{}, fmt.Errorf("%w: nesting deeper than %d", ErrMemoryLimit, p.lim.MaxParseDepth)
 	}
-	tv, err := d.next()
+	tv, err := d.next(p)
 	if err != nil {
 		return Value{}, err
 	}
 	switch tv.tok {
 	case TokInt:
 		// Lookahead for an indirect reference: <int> <int> R.
-		tv2, err := d.next()
+		tv2, err := d.next(p)
 		if err != nil {
 			return Value{}, err
 		}
 		if tv2.tok == TokInt {
-			tv3, err := d.next()
+			tv3, err := d.next(p)
 			if err != nil {
 				return Value{}, err
 			}
@@ -113,7 +114,7 @@ func (d *Decoder) parseNext(depth int) (Value, error) {
 	case TokArrayOpen:
 		stackStart := len(d.stack)
 		for {
-			nt, err := d.next()
+			nt, err := d.next(p)
 			if err != nil {
 				return Value{}, err
 			}
@@ -124,20 +125,20 @@ func (d *Decoder) parseNext(depth int) (Value, error) {
 				return Value{}, &SyntaxError{Off: nt.pos, Msg: "unterminated array"}
 			}
 			d.unread(nt)
-			v, err := d.parseNext(depth + 1)
+			v, err := d.parseNext(p, depth+1)
 			if err != nil {
 				return Value{}, err
 			}
-			if err := d.pushStack(v); err != nil {
+			if err := d.pushStack(p, v); err != nil {
 				return Value{}, err
 			}
 		}
-		return d.closeComposite(KindArray, stackStart, 1)
+		return d.closeComposite(p, KindArray, stackStart, 1)
 
 	case TokDictOpen:
 		stackStart := len(d.stack)
 		for {
-			nt, err := d.next()
+			nt, err := d.next(p)
 			if err != nil {
 				return Value{}, err
 			}
@@ -147,18 +148,18 @@ func (d *Decoder) parseNext(depth int) (Value, error) {
 			if nt.tok != TokName {
 				return Value{}, &SyntaxError{Off: nt.pos, Msg: "expected name as dictionary key"}
 			}
-			v, err := d.parseNext(depth + 1)
+			v, err := d.parseNext(p, depth+1)
 			if err != nil {
 				return Value{}, err
 			}
-			if err := d.pushStack(nt.val); err != nil {
+			if err := d.pushStack(p, nt.val); err != nil {
 				return Value{}, err
 			}
-			if err := d.pushStack(v); err != nil {
+			if err := d.pushStack(p, v); err != nil {
 				return Value{}, err
 			}
 		}
-		return d.closeComposite(KindDict, stackStart, 2)
+		return d.closeComposite(p, KindDict, stackStart, 2)
 
 	case TokEOF:
 		return Value{}, &SyntaxError{Off: tv.pos, Msg: "unexpected end of input"}
@@ -166,34 +167,35 @@ func (d *Decoder) parseNext(depth int) (Value, error) {
 	return Value{}, &SyntaxError{Off: tv.pos, Msg: "unexpected token " + tv.tok.String()}
 }
 
-// pushStack adds a pending composite element, enforcing the arena budget:
+// pushStack adds a pending composite element, enforcing p's arena budget:
 // stack elements are counted because they move verbatim into the arena.
-func (d *Decoder) pushStack(v Value) error {
-	if !d.lim.Grow && len(d.values)+len(d.stack) >= d.lim.ValueArena {
-		d.stats.Dropped++
-		return fmt.Errorf("%w: value arena capacity %d", ErrMemoryLimit, d.lim.ValueArena)
+func (d *Decoder) pushStack(p *PDF, v Value) error {
+	if !p.lim.Grow && len(p.values)+len(d.stack) >= p.lim.ValueArena {
+		p.stats.Dropped++
+		return fmt.Errorf("%w: value arena capacity %d", ErrMemoryLimit, p.lim.ValueArena)
 	}
 	d.stack = append(d.stack, v)
 	return nil
 }
 
-// closeComposite moves the elements accumulated since stackStart into the
+// closeComposite moves the elements accumulated since stackStart into p's
 // values arena and returns the composite Value spanning them. perElem is 1
 // for arrays and 2 for dictionaries (key+value pairs).
-func (d *Decoder) closeComposite(kind Kind, stackStart, perElem int) (Value, error) {
+func (d *Decoder) closeComposite(p *PDF, kind Kind, stackStart, perElem int) (Value, error) {
 	n := len(d.stack) - stackStart
-	start := len(d.values)
-	d.values = append(d.values, d.stack[stackStart:]...)
+	start := len(p.values)
+	p.values = append(p.values, d.stack[stackStart:]...)
 	d.stack = d.stack[:stackStart]
-	if hw := len(d.values) + len(d.stack); hw > d.stats.ValuesHighWater {
-		d.stats.ValuesHighWater = hw
+	if hw := len(p.values) + len(d.stack); hw > p.stats.ValuesHighWater {
+		p.stats.ValuesHighWater = hw
 	}
 	return Value{Kind: kind, I: int64(start), N: uint32(n / perElem)}, nil
 }
 
-// resetScratch recycles the per-parse arenas. Interned names persist.
-func (d *Decoder) resetScratch() {
-	d.values = d.values[:0]
+// resetScratch recycles the machine scratch and p's per-parse arena.
+// Interned names persist.
+func (d *Decoder) resetScratch(p *PDF) {
+	p.values = p.values[:0]
 	d.stack = d.stack[:0]
 	d.npb = 0
 }

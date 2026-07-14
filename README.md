@@ -9,6 +9,22 @@ at decode time, independent of document size.
 
 ## Design
 
+Two types split the work:
+
+- **`PDF`** — the lazily decoded state of one document. Owns all
+  per-document memory (xref sections, name arena, value arena); slice
+  capacity bounds allocation, length is usage, element types hold no
+  pointers. A PDF references neither the file nor the Decoder: decode,
+  close the file, keep the struct, and hand a reader over the identical
+  bytes back to lazy methods later.
+- **`Decoder`** — the reusable machine (lexer, parse scratch, ~5 KB
+  bounded). Decodes into PDF structs without retaining them; its memory
+  stays constant no matter how many documents it processes.
+
+The `io.ReaderAt` is never stored. Methods that need the file take it
+explicitly — the signature tells you whether an operation touches the file
+(`d.Resolve(p, r, id)`) or only already-decoded state (`p.DictGet(v, name)`).
+
 - **`io.ReaderAt` is the only data abstraction.** The decoder never buffers
   the document. Derived readers (raw stream payloads via `io.SectionReader`,
   later: decoded streams, concatenated page content) nest over the same
@@ -38,20 +54,23 @@ at decode time, independent of document size.
 f, _ := os.Open("doc.pdf")
 st, _ := f.Stat()
 
-var d piudf.Decoder
-err := d.Decode(f, st.Size(), piudf.Limits{
+var d piudf.Decoder // reusable machine
+var p piudf.PDF     // document state, user-owned memory
+err := d.Decode(&p, f, st.Size(), piudf.DecodeLimits{
 	ValueArena: 512, NameArena: 2048, MaxLiteral: 4096, MaxParseDepth: 16,
-	Grow: false, // hard memory bound; use DefaultLimits() to grow freely
+	Grow: false, // hard memory bound; use DefaultDecodeLimits() to grow freely
 })
 if err != nil { /* ... */ }
+// p holds no reference to f: you may close f here and reopen the same
+// bytes later for the lazy calls below.
 
-catalog, err := d.Resolve(d.Root())
-pages, err := d.DictGet(catalog, "Pages")
-pagesDict, err := d.Resolve(pages.Ref)
-// Values are valid until the next Resolve/Trailer/Decode call.
+catalog, err := d.Resolve(&p, f, p.Root())
+pages, err := p.DictGet(catalog, "Pages") // no file needed
+pagesDict, err := d.Resolve(&p, f, pages.Ref)
+// Values are valid until the next Resolve/Trailer/Decode into that PDF.
 
-sv, _ := d.Resolve(contentsID)
-r, info, _ := d.RawStream(sv) // *io.SectionReader over raw payload + filter name
+sv, _ := d.Resolve(&p, f, contentsID)
+r, info, _ := d.RawStream(&p, f, sv) // *io.SectionReader over raw payload + filter name
 ```
 
 `Decode` parses only the trailer and cross-reference chain; no object

@@ -78,14 +78,18 @@ func basicPDF() *pdfBuilder {
 	return b
 }
 
-func decodeBuilder(t *testing.T, b *pdfBuilder, lim Limits) *Decoder {
+// decodeBuilder decodes b's document and returns the machine, the document
+// and the reader the lazy methods need.
+func decodeBuilder(t *testing.T, b *pdfBuilder, lim DecodeLimits) (*Decoder, *PDF, *bytes.Reader) {
 	t.Helper()
 	var d Decoder
+	var p PDF
 	data := b.buf.Bytes()
-	if err := d.Decode(bytes.NewReader(data), int64(len(data)), lim); err != nil {
+	r := bytes.NewReader(data)
+	if err := d.Decode(&p, r, int64(len(data)), lim); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	return &d
+	return &d, &p, r
 }
 
 func TestLexerTokens(t *testing.T) {
@@ -224,32 +228,32 @@ func TestNameArena(t *testing.T) {
 func TestDecodeBasic(t *testing.T) {
 	b := basicPDF()
 	b.xrefTrailer(6, " /Root 1 0 R", -1)
-	d := decodeBuilder(t, b, Limits{})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{})
 
-	if d.Root() != (ObjectID{Num: 1}) {
-		t.Fatalf("Root = %v", d.Root())
+	if p.Root() != (ObjectID{Num: 1}) {
+		t.Fatalf("Root = %v", p.Root())
 	}
-	cat, err := d.Resolve(ObjectID{Num: 1})
+	cat, err := d.Resolve(p, r, ObjectID{Num: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	typ, err := d.DictGet(cat, "Type")
-	if err != nil || !d.NameIs(typ, "Catalog") {
+	typ, err := p.DictGet(cat, "Type")
+	if err != nil || !p.NameIs(typ, "Catalog") {
 		t.Fatalf("catalog /Type: %v %v", typ, err)
 	}
-	pages, err := d.DictGet(cat, "Pages")
+	pages, err := p.DictGet(cat, "Pages")
 	if err != nil || !pages.IsRef() || pages.Ref != (ObjectID{Num: 2}) {
 		t.Fatalf("catalog /Pages: %+v %v", pages, err)
 	}
-	missing, err := d.DictGet(cat, "Nonexistent")
+	missing, err := p.DictGet(cat, "Nonexistent")
 	if err != nil || !missing.IsNull() {
 		t.Fatalf("missing key: %+v %v", missing, err)
 	}
-	tr, err := d.Trailer()
+	tr, err := d.Trailer(p, r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sz, err := d.DictGet(tr, "Size")
+	sz, err := p.DictGet(tr, "Size")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +265,9 @@ func TestDecodeBasic(t *testing.T) {
 func TestDecodeKitchenSinkArray(t *testing.T) {
 	b := basicPDF()
 	b.xrefTrailer(6, " /Root 1 0 R", -1)
-	d := decodeBuilder(t, b, Limits{})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{})
 
-	arr, err := d.Resolve(ObjectID{Num: 5})
+	arr, err := d.Resolve(p, r, ObjectID{Num: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +277,7 @@ func TestDecodeKitchenSinkArray(t *testing.T) {
 	wantKind := []Kind{KindInt, KindInt, KindReal, KindString, KindHexString,
 		KindName, KindBool, KindBool, KindNull, KindRef}
 	for i, wk := range wantKind {
-		v, err := d.ArrayIndex(arr, i)
+		v, err := p.ArrayIndex(arr, i)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -281,33 +285,33 @@ func TestDecodeKitchenSinkArray(t *testing.T) {
 			t.Errorf("elem %d: kind %v, want %v", i, v.Kind, wk)
 		}
 	}
-	v0, _ := d.ArrayIndex(arr, 0)
+	v0, _ := p.ArrayIndex(arr, 0)
 	if n, _ := v0.Int(); n != 42 {
 		t.Errorf("elem 0 = %d", n)
 	}
-	v1, _ := d.ArrayIndex(arr, 1)
+	v1, _ := p.ArrayIndex(arr, 1)
 	if n, _ := v1.Int(); n != -7 {
 		t.Errorf("elem 1 = %d", n)
 	}
-	v2, _ := d.ArrayIndex(arr, 2)
+	v2, _ := p.ArrayIndex(arr, 2)
 	if f, _ := v2.Float(); f != 2.5 {
 		t.Errorf("elem 2 = %v", f)
 	}
-	v3, _ := d.ArrayIndex(arr, 3)
-	s, err := d.AppendString(nil, v3)
+	v3, _ := p.ArrayIndex(arr, 3)
+	s, err := d.AppendString(nil, r, v3)
 	if err != nil || string(s) != "hi)there" {
 		t.Errorf("elem 3 string = %q, %v", s, err)
 	}
-	v4, _ := d.ArrayIndex(arr, 4)
-	s, err = d.AppendString(s[:0], v4)
+	v4, _ := p.ArrayIndex(arr, 4)
+	s, err = d.AppendString(s[:0], r, v4)
 	if err != nil || !bytes.Equal(s, []byte{0xBE, 0xEF}) {
 		t.Errorf("elem 4 hex = %#x, %v", s, err)
 	}
-	v5, _ := d.ArrayIndex(arr, 5)
-	if !d.NameIs(v5, "Näme x") { // #20 decodes to space; UTF-8 bytes pass through.
-		t.Errorf("elem 5 name = %q", d.NameBytes(v5.Name))
+	v5, _ := p.ArrayIndex(arr, 5)
+	if !p.NameIs(v5, "Näme x") { // #20 decodes to space; UTF-8 bytes pass through.
+		t.Errorf("elem 5 name = %q", p.NameBytes(v5.Name))
 	}
-	v9, _ := d.ArrayIndex(arr, 9)
+	v9, _ := p.ArrayIndex(arr, 9)
 	if v9.Ref != (ObjectID{Num: 6}) {
 		t.Errorf("elem 9 ref = %v", v9.Ref)
 	}
@@ -316,21 +320,21 @@ func TestDecodeKitchenSinkArray(t *testing.T) {
 func TestRawStream(t *testing.T) {
 	b := basicPDF()
 	b.xrefTrailer(6, " /Root 1 0 R", -1)
-	d := decodeBuilder(t, b, Limits{})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{})
 
-	sv, err := d.Resolve(ObjectID{Num: 4})
+	sv, err := d.Resolve(p, r, ObjectID{Num: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sv.Kind != KindStream {
 		t.Fatalf("kind = %v", sv.Kind)
 	}
-	sr, info, err := d.RawStream(sv)
+	sr, info, err := d.RawStream(p, r, sv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.names.is(info.Filter, "FlateDecode") {
-		t.Errorf("filter = %q", d.NameBytes(info.Filter))
+	if !p.names.is(info.Filter, "FlateDecode") {
+		t.Errorf("filter = %q", p.NameBytes(info.Filter))
 	}
 	payload := make([]byte, info.Length)
 	if _, err := sr.ReadAt(payload, 0); err != nil {
@@ -347,9 +351,9 @@ func TestIncrementalUpdateShadowing(t *testing.T) {
 	// Incremental update: replace object 6.
 	b.obj(6, "5678")
 	b.update([]uint32{6}, 7, " /Root 1 0 R", firstXref)
-	d := decodeBuilder(t, b, Limits{})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{})
 
-	v, err := d.Resolve(ObjectID{Num: 6})
+	v, err := d.Resolve(p, r, ObjectID{Num: 6})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +361,7 @@ func TestIncrementalUpdateShadowing(t *testing.T) {
 		t.Errorf("object 6 = %d, want updated 5678", n)
 	}
 	// Objects only in the old revision remain reachable through /Prev.
-	if _, err := d.Resolve(ObjectID{Num: 1}); err != nil {
+	if _, err := d.Resolve(p, r, ObjectID{Num: 1}); err != nil {
 		t.Errorf("object 1 through /Prev chain: %v", err)
 	}
 }
@@ -365,10 +369,10 @@ func TestIncrementalUpdateShadowing(t *testing.T) {
 func TestObjectNotFound(t *testing.T) {
 	b := basicPDF()
 	b.xrefTrailer(8, " /Root 1 0 R", -1) // Objects 7, 8 emitted as free.
-	d := decodeBuilder(t, b, Limits{})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{})
 
 	for _, id := range []ObjectID{{Num: 0}, {Num: 7}, {Num: 100}, {Num: 5, Gen: 9}} {
-		if _, err := d.Resolve(id); !errors.Is(err, ErrObjectNotFound) {
+		if _, err := d.Resolve(p, r, id); !errors.Is(err, ErrObjectNotFound) {
 			t.Errorf("Resolve(%v) = %v, want ErrObjectNotFound", id, err)
 		}
 	}
@@ -378,26 +382,27 @@ func TestMemoryLimitDegradation(t *testing.T) {
 	b := basicPDF()
 	b.xrefTrailer(6, " /Root 1 0 R", -1)
 	// Arena fits the 2-pair trailer (4 values) but not the 10-element array.
-	d := decodeBuilder(t, b, Limits{ValueArena: 6, NameArena: 512, MaxLiteral: 128, MaxParseDepth: 8})
+	d, p, r := decodeBuilder(t, b, DecodeLimits{ValueArena: 6, NameArena: 512, MaxLiteral: 128, MaxParseDepth: 8})
 
-	if _, err := d.Resolve(ObjectID{Num: 5}); !errors.Is(err, ErrMemoryLimit) {
+	if _, err := d.Resolve(p, r, ObjectID{Num: 5}); !errors.Is(err, ErrMemoryLimit) {
 		t.Fatalf("big array: %v, want ErrMemoryLimit", err)
 	}
-	// Decoder soft-degrades: scalars still resolve after the failure.
-	v, err := d.Resolve(ObjectID{Num: 6})
+	// Document soft-degrades: scalars still resolve after the failure.
+	v, err := d.Resolve(p, r, ObjectID{Num: 6})
 	if err != nil {
 		t.Fatalf("scalar after limit hit: %v", err)
 	}
 	if n, _ := v.Int(); n != 1234 {
 		t.Errorf("object 6 = %d", n)
 	}
-	if d.Stats().Dropped == 0 {
+	if p.Stats().Dropped == 0 {
 		t.Error("Stats.Dropped not incremented")
 	}
 	// Tiny name arena fails Decode outright: structural names don't fit.
 	var d2 Decoder
+	var p2 PDF
 	data := b.buf.Bytes()
-	err = d2.Decode(bytes.NewReader(data), int64(len(data)), Limits{ValueArena: 64, NameArena: 4, MaxLiteral: 128, MaxParseDepth: 8})
+	err = d2.Decode(&p2, bytes.NewReader(data), int64(len(data)), DecodeLimits{ValueArena: 64, NameArena: 4, MaxLiteral: 128, MaxParseDepth: 8})
 	if !errors.Is(err, ErrMemoryLimit) {
 		t.Errorf("tiny name arena Decode: %v, want ErrMemoryLimit", err)
 	}
@@ -411,9 +416,66 @@ func TestXrefStreamUnsupported(t *testing.T) {
 	buf.WriteString("1 0 obj\n<< /Type /XRef >>\nstream\nendstream\nendobj\n")
 	fmt.Fprintf(&buf, "startxref\n%d\n%%%%EOF\n", off)
 	var d Decoder
-	err := d.Decode(bytes.NewReader(buf.Bytes()), int64(buf.Len()), Limits{})
+	var p PDF
+	err := d.Decode(&p, bytes.NewReader(buf.Bytes()), int64(buf.Len()), DecodeLimits{})
 	if !errors.Is(err, ErrUnsupported) {
 		t.Errorf("got %v, want ErrUnsupported", err)
+	}
+}
+
+// TestDecoderReuseNoTamper checks the machine/document split contract: one
+// Decoder serves several PDF structs without corrupting earlier documents,
+// and a reset PDF reuses its capacity.
+func TestDecoderReuseNoTamper(t *testing.T) {
+	bA := basicPDF()
+	bA.xrefTrailer(6, " /Root 1 0 R", -1)
+	dataA := bA.buf.Bytes()
+	rA := bytes.NewReader(dataA)
+
+	bB := newPDFBuilder()
+	bB.obj(1, "<< /Type /Catalog >>")
+	bB.obj(2, "(only in B)")
+	bB.xrefTrailer(2, " /Root 1 0 R", -1)
+	dataB := bB.buf.Bytes()
+	rB := bytes.NewReader(dataB)
+
+	var d Decoder
+	var pA, pB PDF
+	if err := d.Decode(&pA, rA, int64(len(dataA)), DecodeLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve into A, then decode B with the same machine.
+	arrA, err := d.Resolve(&pA, rA, ObjectID{Num: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Decode(&pB, rB, int64(len(dataB)), DecodeLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	// A's arena must be untouched by B's decode: its Value still reads.
+	v0, err := pA.ArrayIndex(arrA, 0)
+	if err != nil {
+		t.Fatalf("A value after decoding B: %v", err)
+	}
+	if n, _ := v0.Int(); n != 42 {
+		t.Errorf("A arena corrupted: elem 0 = %d", n)
+	}
+	// B resolves independently.
+	sB, err := d.Resolve(&pB, rB, ObjectID{Num: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.AppendString(nil, rB, sB)
+	if err != nil || string(got) != "only in B" {
+		t.Errorf("B string = %q, %v", got, err)
+	}
+	// Reusing A's struct for another document keeps its capacity.
+	capBefore := cap(pA.values)
+	if err := d.Decode(&pA, rB, int64(len(dataB)), DecodeLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	if cap(pA.values) != capBefore {
+		t.Errorf("values cap changed on reuse: %d -> %d", capBefore, cap(pA.values))
 	}
 }
 
@@ -423,19 +485,20 @@ func TestResolveAllocs(t *testing.T) {
 	data := b.buf.Bytes()
 	r := bytes.NewReader(data)
 	var d Decoder
-	if err := d.Decode(r, int64(len(data)), Limits{ValueArena: 256, NameArena: 1024, MaxLiteral: 256, MaxParseDepth: 16}); err != nil {
+	var p PDF
+	if err := d.Decode(&p, r, int64(len(data)), DecodeLimits{ValueArena: 256, NameArena: 1024, MaxLiteral: 256, MaxParseDepth: 16}); err != nil {
 		t.Fatal(err)
 	}
 	// Warm up name arena and lexer buffers.
-	if _, err := d.Resolve(ObjectID{Num: 1}); err != nil {
+	if _, err := d.Resolve(&p, r, ObjectID{Num: 1}); err != nil {
 		t.Fatal(err)
 	}
 	allocs := testing.AllocsPerRun(100, func() {
-		v, err := d.Resolve(ObjectID{Num: 1})
+		v, err := d.Resolve(&p, r, ObjectID{Num: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.DictGet(v, "Pages"); err != nil {
+		if _, err := p.DictGet(v, "Pages"); err != nil {
 			t.Fatal(err)
 		}
 	})
