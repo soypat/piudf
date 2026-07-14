@@ -157,6 +157,76 @@ func BenchmarkResolveObjects(b *testing.B) {
 	}
 }
 
+// BenchmarkDecodeEagerInit measures the whole cost of eager decoding: xref
+// chain plus deep-parsing every object into machine representation. This is
+// the price paid up front so that navigation afterwards is lexer-free.
+func BenchmarkDecodeEagerInit(b *testing.B) {
+	d, _, data, locs := loadFile(b, embeddedPDF)
+	r := bytes.NewReader(data)
+	var structuralBytes int64
+	{
+		var lx Lexer
+		lx.ReuseLiteralBuffer = true
+		for _, loc := range locs {
+			_, end := lexObject(b, &lx, r, loc.off)
+			structuralBytes += end - loc.off
+		}
+	}
+	var pe PDFEager
+	b.SetBytes(structuralBytes)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := d.DecodeEager(&pe, r, int64(len(data)), DecodeLimits{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkEagerResolveObjects measures the same per-document object sweep
+// as BenchmarkResolveObjects, but on the machine representation: pure table
+// lookups, no reader, no lexing.
+func BenchmarkEagerResolveObjects(b *testing.B) {
+	d, _, data, locs := loadFile(b, embeddedPDF)
+	r := bytes.NewReader(data)
+	var pe PDFEager
+	if err := d.DecodeEager(&pe, r, int64(len(data)), DecodeLimits{}); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		for _, loc := range locs {
+			if _, err := pe.Resolve(loc.id); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+// BenchmarkEagerResolveCatalog is the eager counterpart of
+// BenchmarkResolveCatalog: table lookup plus entry-pool key scan.
+func BenchmarkEagerResolveCatalog(b *testing.B) {
+	d, _, data, _ := loadFile(b, embeddedPDF)
+	r := bytes.NewReader(data)
+	var pe PDFEager
+	if err := d.DecodeEager(&pe, r, int64(len(data)), DecodeLimits{}); err != nil {
+		b.Fatal(err)
+	}
+	root := pe.Root()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		v, err := pe.Resolve(root)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := pe.DictGet(v, "Pages"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkResolveCatalog measures a single hot-object resolve: one xref
 // record ReadAt plus lexing and parsing of a small dictionary.
 func BenchmarkResolveCatalog(b *testing.B) {

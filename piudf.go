@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unsafe"
 )
 
 // Sentinel errors. Wrapped errors are matched with errors.Is.
@@ -60,6 +61,10 @@ type DecodeLimits struct {
 	// recorded per document (~32 bytes each). Files rarely exceed a dozen
 	// even after many incremental updates.
 	MaxXrefSections int
+	// MaxEntries caps the machine-representation tables built by
+	// DecodeEager: the entry pool (~32 bytes per dictionary pair or array
+	// element) and the object table. Unused by the lazy Decode path.
+	MaxEntries int
 	// Grow permits exceeding MaxXrefSections by reallocating.
 	Grow bool
 }
@@ -72,6 +77,7 @@ func DefaultDecodeLimits() DecodeLimits {
 		MaxLiteral:      1 << 16,
 		MaxParseDepth:   64,
 		MaxXrefSections: 128,
+		MaxEntries:      1 << 16,
 		Grow:            true,
 	}
 }
@@ -89,6 +95,9 @@ func (lim DecodeLimits) withDefaults() DecodeLimits {
 	}
 	if lim.MaxXrefSections <= 0 {
 		lim.MaxXrefSections = def.MaxXrefSections
+	}
+	if lim.MaxEntries <= 0 {
+		lim.MaxEntries = def.MaxEntries
 	}
 	return lim
 }
@@ -135,6 +144,14 @@ type PDF struct {
 	// recbuf backs single xref record reads; a struct field so the slice
 	// passed to the io.ReaderAt interface does not escape per lookup.
 	recbuf [classicRecLen]byte
+}
+
+// SizeOnRAM returns the total bytes of memory held by p: the struct itself
+// plus all memory referenced by its slices. Slice capacity is counted, not
+// length, since the backing memory is allocated either way.
+func (p *PDF) SizeOnRAM() int {
+	return int(unsafe.Sizeof(*p)) +
+		cap(p.sections)*int(unsafe.Sizeof(xrefSection{}))
 }
 
 // Decoder is the decoding machine: lexer and token pushback. The zero

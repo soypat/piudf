@@ -7,6 +7,23 @@ demand. It works identically over an in-memory buffer (`bytes.Reader`) or a
 file of arbitrary size (`os.File`): memory use is independent of document
 size.
 
+## Two decode models
+
+| | `PDF` (lazy) | `PDFEager` |
+|---|---|---|
+| `Decode` cost | O(1) in document size (~4 µs: header, xref, trailer) | O(document structure): every object deep-parsed once |
+| Memory | O(#xref subsections), ~independent of object count | ~32 B per dict pair / array element + name pool |
+| Navigation | re-lexes the value's file span per access (~µs) | table lookups, no lexer, no reader (~ns) |
+| Bulk data | `{offset, size}` spans, read on demand | same |
+| Value semantics | file coordinates: valid for any reader over the same bytes | handles into this PDFEager's tables |
+
+Rule of thumb: touching a small fraction of a potentially huge document →
+lazy `PDF`. Walking most of a normal document, repeatedly → `DecodeEager`,
+which converts the whole structure to machine representation up front so
+that navigation afterwards is lexer-free and reader-free (measured on the
+benchmark corpus: full-document object sweep 140 µs lazy vs 0.2 µs eager;
+decode 3.8 µs lazy vs 314 µs eager).
+
 ## Design
 
 **Values are file coordinates.** A `Value` is either an inline scalar
@@ -78,6 +95,29 @@ _ = d.NameIs(f, info.Filter, "FlateDecode")
 contents are touched. Resolving an object costs one xref record `ReadAt`
 plus a shallow lex of that object — zero heap allocations once buffers are
 warm, including `DictGet` and `NameIs`.
+
+### Eager usage
+
+```go
+var d piudf.Decoder
+var pe piudf.PDFEager
+err := d.DecodeEager(&pe, f, st.Size(), piudf.DecodeLimits{})
+// Structure is machine representation now: no reader, no lexing.
+catalog, _ := pe.Resolve(pe.Root())
+pages, _ := pe.DictGet(catalog, "Pages")     // entry-pool scan
+pagesDict, _ := pe.ResolveRef(pages, 1)      // O(1) table lookup
+kids, _ := pe.DictGet(pagesDict, "Kids")
+n, _ := pe.ArrayLen(kids)                    // O(1)
+// r only returns for bulk data:
+sv, _ := pe.Resolve(someStream)
+sr, info, _ := pe.RawStream(f, sv)
+title, _ := pe.AppendString(nil, f, titleVal)
+```
+
+Objects that exceed `MaxEntries` or fail to parse are dropped individually
+(`Stats().Dropped`, `ErrObjectNotFound` on access) while the rest of the
+document decodes; only structural failures (header, xref chain, trailer)
+fail `DecodeEager` itself.
 
 ## Status / roadmap
 
