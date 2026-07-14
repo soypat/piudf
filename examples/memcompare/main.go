@@ -11,6 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -63,4 +64,16 @@ func main() {
 func timer() func() time.Duration {
 	now := time.Now()
 	return func() time.Duration { return time.Since(now) }
+}
+
+type ReaderAtPrinter struct {
+	r io.ReaderAt
+}
+
+func (r ReaderAtPrinter) ReadAt(p []byte, off int64) (n int, err error) {
+	n, err = r.r.ReadAt(p, off)
+	if n > 0 {
+		fmt.Printf("read %d..%d (%d)\n", off, off+int64(n), n)
+	}
+	return n, err
 }

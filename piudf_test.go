@@ -204,15 +204,15 @@ func TestDecodeBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	typ, err := d.DictGet(r, cat, "Type")
-	if err != nil || !d.NameIs(r, typ, "Catalog") {
+	typ, err := d.DictGet(p, r, cat, "Type")
+	if err != nil || !d.NameIs(p, r, typ, "Catalog") {
 		t.Fatalf("catalog /Type: %v %v", typ, err)
 	}
-	pages, err := d.DictGet(r, cat, "Pages")
+	pages, err := d.DictGet(p, r, cat, "Pages")
 	if err != nil || !pages.IsRef() || pages.Ref != (ObjectID{Num: 2}) {
 		t.Fatalf("catalog /Pages: %+v %v", pages, err)
 	}
-	missing, err := d.DictGet(r, cat, "Nonexistent")
+	missing, err := d.DictGet(p, r, cat, "Nonexistent")
 	if err != nil || !missing.IsNull() {
 		t.Fatalf("missing key: %+v %v", missing, err)
 	}
@@ -220,7 +220,7 @@ func TestDecodeBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sz, err := d.DictGet(r, tr, "Size")
+	sz, err := d.DictGet(p, r, tr, "Size")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +229,8 @@ func TestDecodeBasic(t *testing.T) {
 	}
 	// Values survive interleaved use of the machine: cat's span still
 	// reads after the machine lexed the trailer.
-	typ2, err := d.DictGet(r, cat, "Type")
-	if err != nil || !d.NameIs(r, typ2, "Catalog") {
+	typ2, err := d.DictGet(p, r, cat, "Type")
+	if err != nil || !d.NameIs(p, r, typ2, "Catalog") {
 		t.Fatalf("catalog /Type after trailer parse: %v %v", typ2, err)
 	}
 }
@@ -247,13 +247,13 @@ func TestDecodeKitchenSinkArray(t *testing.T) {
 	if arr.Kind != KindArray {
 		t.Fatalf("got %v, want array", arr.Kind)
 	}
-	if n, err := d.ArrayLen(r, arr); err != nil || n != 11 {
+	if n, err := d.ArrayLen(p, r, arr); err != nil || n != 11 {
 		t.Fatalf("ArrayLen = %d, %v; want 11", n, err)
 	}
 	wantKind := []Kind{KindInt, KindInt, KindReal, KindString, KindHexString,
 		KindName, KindBool, KindBool, KindNull, KindRef, KindDict}
 	for i, wk := range wantKind {
-		v, err := d.ArrayIndex(r, arr, i)
+		v, err := d.ArrayIndex(p, r, arr, i)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -261,44 +261,44 @@ func TestDecodeKitchenSinkArray(t *testing.T) {
 			t.Errorf("elem %d: kind %v, want %v", i, v.Kind, wk)
 		}
 	}
-	v0, _ := d.ArrayIndex(r, arr, 0)
+	v0, _ := d.ArrayIndex(p, r, arr, 0)
 	if n, _ := v0.Int(); n != 42 {
 		t.Errorf("elem 0 = %d", n)
 	}
-	v1, _ := d.ArrayIndex(r, arr, 1)
+	v1, _ := d.ArrayIndex(p, r, arr, 1)
 	if n, _ := v1.Int(); n != -7 {
 		t.Errorf("elem 1 = %d", n)
 	}
-	v2, _ := d.ArrayIndex(r, arr, 2)
+	v2, _ := d.ArrayIndex(p, r, arr, 2)
 	if f, _ := v2.Float(); f != 2.5 {
 		t.Errorf("elem 2 = %v", f)
 	}
-	v3, _ := d.ArrayIndex(r, arr, 3)
-	s, err := d.AppendString(nil, r, v3)
+	v3, _ := d.ArrayIndex(p, r, arr, 3)
+	s, err := d.AppendString(nil, p, r, v3)
 	if err != nil || string(s) != "hi)there" {
 		t.Errorf("elem 3 string = %q, %v", s, err)
 	}
-	v4, _ := d.ArrayIndex(r, arr, 4)
-	s, err = d.AppendString(s[:0], r, v4)
+	v4, _ := d.ArrayIndex(p, r, arr, 4)
+	s, err = d.AppendString(s[:0], p, r, v4)
 	if err != nil || !bytes.Equal(s, []byte{0xBE, 0xEF}) {
 		t.Errorf("elem 4 hex = %#x, %v", s, err)
 	}
-	v5, _ := d.ArrayIndex(r, arr, 5)
-	if !d.NameIs(r, v5, "Näme x") { // #20 decodes to space; UTF-8 bytes pass through.
-		s, _ := d.AppendString(nil, r, v5)
+	v5, _ := d.ArrayIndex(p, r, arr, 5)
+	if !d.NameIs(p, r, v5, "Näme x") { // #20 decodes to space; UTF-8 bytes pass through.
+		s, _ := d.AppendString(nil, p, r, v5)
 		t.Errorf("elem 5 name = %q", s)
 	}
-	v9, _ := d.ArrayIndex(r, arr, 9)
+	v9, _ := d.ArrayIndex(p, r, arr, 9)
 	if v9.Ref != (ObjectID{Num: 6}) {
 		t.Errorf("elem 9 ref = %v", v9.Ref)
 	}
 	// Nested dict span works and out-of-range errors.
-	v10, _ := d.ArrayIndex(r, arr, 10)
-	nested, err := d.DictGet(r, v10, "Nested")
+	v10, _ := d.ArrayIndex(p, r, arr, 10)
+	nested, err := d.DictGet(p, r, v10, "Nested")
 	if err != nil || nested.Kind != KindArray {
 		t.Errorf("nested dict get: %+v %v", nested, err)
 	}
-	if _, err := d.ArrayIndex(r, arr, 11); err == nil {
+	if _, err := d.ArrayIndex(p, r, arr, 11); err == nil {
 		t.Error("index 11: want out of range error")
 	}
 }
@@ -319,7 +319,7 @@ func TestRawStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.NameIs(r, info.Filter, "FlateDecode") {
+	if !d.NameIs(p, r, info.Filter, "FlateDecode") {
 		t.Errorf("filter kind %v not FlateDecode", info.Filter.Kind)
 	}
 	payload := make([]byte, info.Length)
@@ -397,8 +397,10 @@ func TestMemoryLimitDegradation(t *testing.T) {
 	}
 }
 
-func TestXrefStreamUnsupported(t *testing.T) {
-	// A file whose startxref points at an object header (xref stream form).
+func TestXrefStreamMalformed(t *testing.T) {
+	// A file whose startxref points at an object header (xref stream form)
+	// with a dictionary missing the mandatory entries must fail as corrupt,
+	// not crash.
 	var buf bytes.Buffer
 	buf.WriteString("%PDF-1.5\n")
 	off := buf.Len()
@@ -407,8 +409,8 @@ func TestXrefStreamUnsupported(t *testing.T) {
 	var d Decoder
 	var p PDF
 	err := d.Decode(&p, bytes.NewReader(buf.Bytes()), int64(buf.Len()), DecodeLimits{})
-	if !errors.Is(err, ErrUnsupported) {
-		t.Errorf("got %v, want ErrUnsupported", err)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("got %v, want ErrCorrupt", err)
 	}
 }
 
@@ -449,20 +451,20 @@ func TestValueDurability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := d.AppendString(nil, rB, sB)
+	got, err := d.AppendString(nil, &pB, rB, sB)
 	if err != nil || string(got) != "only in B" {
 		t.Fatalf("B string = %q, %v", got, err)
 	}
 	// A's Values are file coordinates: still readable, no staleness.
-	v0, err := d.ArrayIndex(rA, arrA, 0)
+	v0, err := d.ArrayIndex(&pA, rA, arrA, 0)
 	if err != nil {
 		t.Fatalf("A array after B: %v", err)
 	}
 	if n, _ := v0.Int(); n != 42 {
 		t.Errorf("A elem 0 = %d", n)
 	}
-	typ, err := d.DictGet(rA, catA, "Type")
-	if err != nil || !d.NameIs(rA, typ, "Catalog") {
+	typ, err := d.DictGet(&pA, rA, catA, "Type")
+	if err != nil || !d.NameIs(&pA, rA, typ, "Catalog") {
 		t.Errorf("A catalog /Type after B: %v %v", typ, err)
 	}
 	// Reusing A's struct for another document keeps section capacity.
@@ -494,11 +496,11 @@ func TestResolveAllocs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		typ, err := d.DictGet(r, v, "Type")
+		typ, err := d.DictGet(&p, r, v, "Type")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !d.NameIs(r, typ, "Catalog") {
+		if !d.NameIs(&p, r, typ, "Catalog") {
 			t.Fatal("not catalog")
 		}
 	})

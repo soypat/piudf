@@ -8,10 +8,11 @@ import (
 // tokval is a token with its literal already converted to a Value.
 type tokval struct {
 	val Value
-	// lit aliases the lexer's literal buffer for TokName tokens. It is
-	// valid until the lexer produces its next literal-bearing token; the
-	// pushback queue holds at most one literal-bearing token (the most
-	// recently lexed), so a popped lit is always still intact.
+	// lit aliases the lexer's literal buffer for TokName, TokString and
+	// TokHexString tokens (decoded payload). It is valid until the lexer
+	// produces its next literal-bearing token; the pushback queue holds at
+	// most one literal-bearing token (the most recently lexed), so a
+	// popped lit is always still intact.
 	lit []byte
 	pos Pos
 	tok Token
@@ -51,8 +52,10 @@ func (d *Decoder) next() (tokval, error) {
 		tv.lit = lit
 	case TokString:
 		tv.val = Value{Kind: KindString, I: int64(pos), N: spanLen(pos, d.lx.Pos())}
+		tv.lit = lit
 	case TokHexString:
 		tv.val = Value{Kind: KindHexString, I: int64(pos), N: spanLen(pos, d.lx.Pos())}
+		tv.lit = lit
 	case TokTrue:
 		tv.val = Value{Kind: KindBool, I: 1}
 	case TokFalse:

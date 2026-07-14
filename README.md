@@ -5,17 +5,26 @@ Lazy, memory-constrained PDF decoder for Go, driven entirely by `io.ReaderAt`.
 piudf records file offsets instead of contents and parses indirect objects on
 demand. It works identically over an in-memory buffer (`bytes.Reader`) or a
 file of arbitrary size (`os.File`): memory use is independent of document
-size.
+size. Both classic cross-reference tables and PDF 1.5+ cross-reference
+streams with compressed object streams are supported.
 
 ## Two decode models
 
 | | `PDF` (lazy) | `PDFEager` |
 |---|---|---|
-| `Decode` cost | O(1) in document size (~4 µs: header, xref, trailer) | O(document structure): every object deep-parsed once |
-| Memory | O(#xref subsections), ~independent of object count | ~32 B per dict pair / array element + name pool |
-| Navigation | re-lexes the value's file span per access (~µs) | table lookups, no lexer, no reader (~ns) |
+| `Decode` cost | O(1) in document size (~4 µs: header, xref, trailer)¹ | O(document structure): every object deep-parsed once |
+| Memory | O(#xref subsections), ~independent of object count¹ | ~32 B per dict pair / array element + name pool |
+| Navigation | re-lexes the value's span per access (~µs) | table lookups, no lexer, no reader (~ns) |
 | Bulk data | `{offset, size}` spans, read on demand | same |
 | Value semantics | file coordinates: valid for any reader over the same bytes | handles into this PDFEager's tables |
+
+¹ For PDF 1.5+ files using cross-reference *streams*, compressed data has
+no random access, so the lazy index necessarily keeps the decoded xref
+records and a cache holding one decompressed object stream at a time, both
+capped by `DecodeLimits.MaxDecompress`. The 7.9 MB `rp2350-datasheet.pdf`
+corpus (15 888 objects, 90% inside object streams) opens lazily in ~540 µs
+holding 131 KB; a classic-table file of any size still opens in ~4 µs
+holding ~160 B.
 
 Rule of thumb: touching a small fraction of a potentially huge document →
 lazy `PDF`. Walking most of a normal document, repeatedly → `DecodeEager`,
@@ -37,9 +46,11 @@ operations or documents.
 Two types split the work:
 
 - **`PDF`** — the lazy index of one document: cross-reference section
-  descriptors and trailer metadata, nothing else. Memory is O(number of
-  xref subsections) — ~32 B each, typically fewer than ten — regardless of
-  object count. A PDF references neither the file nor the Decoder.
+  descriptors and trailer metadata. For classic-table files memory is
+  O(number of xref subsections) — ~32 B each, typically fewer than ten —
+  regardless of object count; PDF 1.5 files add the decoded xref records
+  and the object-stream cache (see below). A PDF references neither the
+  file nor the Decoder.
 - **`Decoder`** — the reusable machine (lexer + token pushback, ~5 KB
   bounded). Operates on PDF structs without retaining them; its memory
   stays constant no matter how many documents it processes.
@@ -48,10 +59,20 @@ The `io.ReaderAt` is never stored. Every operation that touches the file
 takes it explicitly: decode, close the file, keep the PDF struct and any
 Values, then reopen the same bytes later and keep reading.
 
-- **The cross-reference table is not materialized.** Classic xref tables are
-  already random-access arrays of fixed 20-byte records on disk, so the
-  decoder stores only one descriptor per xref subsection and reads single
-  records with `ReadAt` on lookup.
+- **The cross-reference table is not materialized when the file permits.**
+  Classic xref tables are already random-access arrays of fixed 20-byte
+  records on disk, so the decoder stores only one descriptor per xref
+  subsection and reads single records with `ReadAt` on lookup. PDF 1.5
+  cross-reference streams are FlateDecode-compressed, which forbids random
+  access; their decoded records (a few bytes per object) are kept in the
+  PDF, capped by `MaxDecompress`.
+- **Objects inside object streams (PDF 1.5+) resolve transparently.** The
+  containing stream is inflated into a one-entry cache on first touch;
+  Values parsed there are tagged with their stream (`Value.Ref`) and the
+  accessors read them from the cache, re-inflating only when a different
+  stream is touched. Sequential access to one stream's objects costs one
+  decompression (~12 µs per cached resolve vs ~230 µs cache-miss on the
+  datasheet corpus).
 - **Resolution is shallow.** `Resolve` parses scalars inline and returns
   composites as raw spans; `DictGet`/`ArrayIndex` scan the raw text of one
   span per call (~µs). Cost lives at access time, not decode time.
@@ -80,15 +101,15 @@ if err != nil { /* ... */ }
 // whenever you like.
 
 catalog, _ := d.Resolve(&p, f, p.Root())
-pages, _ := d.DictGet(f, catalog, "Pages")   // re-lexes the dict span
+pages, _ := d.DictGet(&p, f, catalog, "Pages") // re-lexes the dict span
 pagesDict, _ := d.Resolve(&p, f, pages.Ref)
-kids, _ := d.DictGet(f, pagesDict, "Kids")
-first, _ := d.ArrayIndex(f, kids, 0)
+kids, _ := d.DictGet(&p, f, pagesDict, "Kids")
+first, _ := d.ArrayIndex(&p, f, kids, 0)
 // Values are plain file coordinates: store them, they never go stale.
 
 sv, _ := d.Resolve(&p, f, first.Ref)
 r, info, _ := d.RawStream(&p, f, sv) // *io.SectionReader over raw payload
-_ = d.NameIs(f, info.Filter, "FlateDecode")
+_ = d.NameIs(&p, f, info.Filter, "FlateDecode")
 ```
 
 `Decode` parses only the trailer and cross-reference chain; no object
@@ -121,14 +142,17 @@ fail `DecodeEager` itself.
 
 ## Status / roadmap
 
-Supported now: classic cross-reference tables, incremental updates
-(`/Prev` chains, newest revision shadows), all object kinds, stream objects
-with raw payload access, exact-offset syntax errors (`Pos.ToLineCol` for
-diagnostics).
+Supported now: classic cross-reference tables and PDF 1.5+ cross-reference
+streams (FlateDecode, PNG predictors), objects inside compressed object
+streams in both decode models, incremental updates (`/Prev` chains, newest
+revision shadows, classic and stream sections mixing freely), all object
+kinds, stream objects with raw payload access, exact-offset syntax errors
+(`Pos.ToLineCol` for diagnostics).
 
-Not yet (returns `ErrUnsupported`): cross-reference streams and object
-streams (PDF 1.5+), filters/decompression, encryption, page-tree navigation
-(`NumPages`/`Page(i)`), linearized fast path.
+Not yet (returns `ErrUnsupported`): payload filters/decompression beyond
+the structural internals (RawStream stays raw by design), TIFF predictor 2,
+encryption, hybrid-reference files' `/XRefStm` fallback, page-tree
+navigation (`NumPages`/`Page(i)`), linearized fast path.
 
 ## Development
 

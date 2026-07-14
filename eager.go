@@ -32,6 +32,11 @@ type PDFEager struct {
 	streams    []eagerStream
 	scratch    []eagerEntry // Composite parse frames, reused across objects.
 	strbuf     []byte       // AppendString raw-span read buffer, reused.
+	strs       []byte       // Decoded strings from object streams (no file span exists).
+	objstms    []uint32     // Unique object stream numbers seen in the sweep.
+	objstmCnt  []uint32     // Objects per stream in objstms, for drop accounting.
+	pairs      []int64      // Pair-table scratch for one object stream.
+	inObjStm   uint32       // Object stream being parsed, 0 in file space.
 	trailerVal Value
 	stats      Stats
 }
@@ -67,6 +72,11 @@ func (p *PDFEager) Reset() {
 	p.nameSpans = p.nameSpans[:0]
 	p.streams = p.streams[:0]
 	p.scratch = p.scratch[:0]
+	p.strs = p.strs[:0]
+	p.objstms = p.objstms[:0]
+	p.objstmCnt = p.objstmCnt[:0]
+	p.pairs = p.pairs[:0]
+	p.inObjStm = 0
 	p.trailerVal = Value{}
 	p.stats = Stats{}
 }
@@ -143,18 +153,105 @@ func (d *Decoder) DecodeEager(dst *PDFEager, r io.ReaderAt, size int64, lim Deco
 	}
 	dst.trailerVal = tv
 
+	dst.objstms = dst.objstms[:0]
+	dst.objstmCnt = dst.objstmCnt[:0]
 	for num := uint32(1); num < uint32(maxObj); num++ {
 		rec, err := dst.pdf.lookupXref(r, num)
 		if err != nil || rec.kind == recFree {
 			continue // Absent objects are not an error.
 		}
-		if rec.kind != recNormal {
-			dst.stats.Dropped++ // Object streams: unsupported.
+		if rec.kind == recCompressed {
+			// Collect unique stream numbers; the second pass below
+			// decompresses each stream exactly once.
+			found := false
+			for i, s := range dst.objstms {
+				if s == rec.stream {
+					dst.objstmCnt[i]++
+					found = true
+					break
+				}
+			}
+			if !found {
+				if !lim.Grow && len(dst.objstms) >= lim.MaxEntries {
+					dst.stats.Dropped++
+					continue
+				}
+				dst.objstms = append(dst.objstms, rec.stream)
+				dst.objstmCnt = append(dst.objstmCnt, 1)
+			}
 			continue
 		}
 		if err := dst.decodeObject(d, r, num, rec); err != nil {
 			dst.stats.Dropped++
 		}
+	}
+	for i, stm := range dst.objstms {
+		if err := dst.decodeObjStm(d, r, stm); err != nil {
+			dst.stats.Dropped += int(dst.objstmCnt[i])
+		}
+	}
+	return nil
+}
+
+// decodeObjStm deep-parses every object of object stream stm that the
+// cross-reference table still attributes to it (newer revisions may have
+// moved individual objects elsewhere). The stream is decompressed once;
+// objects that fail to parse are dropped individually, the rest survive.
+// An error return means the whole stream was unusable.
+func (p *PDFEager) decodeObjStm(d *Decoder, r io.ReaderAt, stm uint32) error {
+	if err := d.loadObjStm(&p.pdf, r, stm); err != nil {
+		return err
+	}
+	n := p.pdf.stmN
+	lim := p.pdf.lim
+	if n > lim.MaxEntries {
+		return fmt.Errorf("%w: object stream of %d objects", ErrMemoryLimit, n)
+	}
+	if cap(p.pairs) < 2*n {
+		if !lim.Grow && cap(p.pairs) > 0 {
+			return fmt.Errorf("%w: pair table of %d objects over buffer capacity", ErrMemoryLimit, n)
+		}
+		p.pairs = make([]int64, 2*n)
+	}
+	pairs := p.pairs[:2*n]
+	// The pair table ("objnum offset" per object) heads the data.
+	if err := d.lexStmAt(&p.pdf, 0); err != nil {
+		return err
+	}
+	for i := range pairs {
+		tv, err := d.next()
+		if err != nil {
+			return err
+		}
+		if tv.tok != TokInt {
+			return fmt.Errorf("%w: malformed pair table in object stream %d", ErrCorrupt, stm)
+		}
+		pairs[i] = tv.val.I
+	}
+	first := p.pdf.stmFirst
+	for i := 0; i < n; i++ {
+		objNum, objOff := pairs[2*i], pairs[2*i+1]
+		if objNum <= 0 || objNum >= int64(len(p.objs)) || objOff < 0 || first+objOff >= int64(len(p.pdf.stmbuf)) {
+			p.stats.Dropped++
+			continue
+		}
+		rec, err := p.pdf.lookupXref(r, uint32(objNum))
+		if err != nil || rec.kind != recCompressed || rec.stream != stm || rec.offset != int64(i) {
+			continue // Shadowed: the live revision of this object lives elsewhere.
+		}
+		if err := d.lexStmAt(&p.pdf, first+objOff); err != nil {
+			p.stats.Dropped++
+			continue
+		}
+		p.scratch = p.scratch[:0]
+		p.inObjStm = stm
+		v, err := p.parseDeep(d, 0)
+		p.inObjStm = 0
+		if err != nil {
+			p.stats.Dropped++
+			continue
+		}
+		p.objs[objNum] = eagerObj{val: v, gen: 0, present: true}
 	}
 	return nil
 }
@@ -244,7 +341,15 @@ func (p *PDFEager) parseDeep(d *Decoder, depth int) (Value, error) {
 		d.unread(tv2)
 		return tv.val, nil
 
-	case TokReal, TokString, TokHexString, TokTrue, TokFalse, TokNull:
+	case TokReal, TokTrue, TokFalse, TokNull:
+		return tv.val, nil
+
+	case TokString, TokHexString:
+		if p.inObjStm != 0 {
+			// No file span exists for a string inside a compressed
+			// object stream: intern its decoded payload instead.
+			return p.internStr(tv.val.Kind, tv.lit)
+		}
 		return tv.val, nil
 
 	case TokName:
@@ -330,6 +435,24 @@ func (p *PDFEager) internName(lit []byte) (Value, error) {
 	p.names = append(p.names, lit...)
 	p.nameSpans = append(p.nameSpans, nv)
 	return nv, nil
+}
+
+// internStr copies the decoded payload of a string lexed inside an object
+// stream into the string pool. The pool handle is marked by a nonzero
+// Ref.Num (file-span strings have zero Ref), which AppendString serves
+// from memory without a reader. The pool shares the MaxDecompress budget:
+// it exists only because the data has no uncompressed home in the file.
+func (p *PDFEager) internStr(kind Kind, lit []byte) (Value, error) {
+	lim := p.pdf.lim
+	if len(p.strs)+len(lit) > lim.MaxDecompress {
+		return Value{}, fmt.Errorf("%w: string pool over %d bytes", ErrMemoryLimit, lim.MaxDecompress)
+	}
+	if !lim.Grow && len(p.strs)+len(lit) > cap(p.strs) {
+		return Value{}, fmt.Errorf("%w: string pool over buffer capacity", ErrMemoryLimit)
+	}
+	v := Value{Kind: kind, I: int64(len(p.strs)), N: uint32(len(lit)), Ref: ObjectID{Num: 1}}
+	p.strs = append(p.strs, lit...)
+	return v, nil
 }
 
 // name returns the pool text of an interned KindName Value.
@@ -471,6 +594,15 @@ func (p *PDFEager) AppendString(dst []byte, r io.ReaderAt, strVal Value) ([]byte
 	case KindString, KindHexString:
 	default:
 		return dst, errKindMismatch
+	}
+	if strVal.Ref.Num != 0 {
+		// Pool-interned (the string came from a compressed object
+		// stream): already decoded, no reader needed.
+		end := strVal.I + int64(strVal.N)
+		if strVal.I < 0 || end > int64(len(p.strs)) {
+			return dst, fmt.Errorf("%w: dangling string handle", ErrCorrupt)
+		}
+		return append(dst, p.strs[strVal.I:end]...), nil
 	}
 	n := int(strVal.N)
 	maxLit := p.pdf.lim.MaxLiteral
@@ -663,5 +795,9 @@ func (p *PDFEager) SizeOnRAM() int {
 	sz += cap(p.streams) * int(unsafe.Sizeof(eagerStream{}))
 	sz += cap(p.scratch) * int(unsafe.Sizeof(eagerEntry{}))
 	sz += cap(p.strbuf)
+	sz += cap(p.strs)
+	sz += cap(p.objstms) * 4
+	sz += cap(p.objstmCnt) * 4
+	sz += cap(p.pairs) * 8
 	return sz
 }

@@ -26,7 +26,7 @@ func loadFile(tb testing.TB, path string) (*Decoder, *PDF, []byte, []objloc) {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	sizeV, err := d.DictGet(r, tr, "Size")
+	sizeV, err := d.DictGet(&p, r, tr, "Size")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -227,6 +227,73 @@ func BenchmarkEagerResolveCatalog(b *testing.B) {
 	}
 }
 
+// BenchmarkDecodeInitXrefStream measures opening the PDF 1.5 corpus:
+// dominated by inflating and predictor-decoding ~111 KB of xref records.
+func BenchmarkDecodeInitXrefStream(b *testing.B) {
+	d, p, r := loadDatasheet(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := d.Decode(p, r, int64(r.Size()), DecodeLimits{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkDecodeEagerInitXrefStream is the eager decode of the PDF 1.5
+// corpus: every object stream decompressed once, all 15888 objects
+// deep-parsed.
+func BenchmarkDecodeEagerInitXrefStream(b *testing.B) {
+	d, _, r := loadDatasheet(b)
+	var pe PDFEager
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := d.DecodeEager(&pe, r, int64(r.Size()), DecodeLimits{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkResolveCompressedHit resolves an object inside an object stream
+// with a warm cache: pair-table skip plus a shallow parse, no inflation.
+func BenchmarkResolveCompressedHit(b *testing.B) {
+	d, p, r := loadDatasheet(b)
+	id := ObjectID{Num: 1352} // A page dictionary of ordinary size.
+	if _, err := d.Resolve(p, r, id); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := d.Resolve(p, r, id); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkResolveCompressedMiss alternates objects living in different
+// object streams, forcing a full stream decompression per resolve — the
+// worst case of the one-stream cache.
+func BenchmarkResolveCompressedMiss(b *testing.B) {
+	d, p, r := loadDatasheet(b)
+	ids := [2]ObjectID{{Num: 1}, {Num: 1352}} // Different object streams.
+	for _, id := range ids {
+		if _, err := d.Resolve(p, r, id); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	n := 0
+	for b.Loop() {
+		if _, err := d.Resolve(p, r, ids[n&1]); err != nil {
+			b.Fatal(err)
+		}
+		n++
+	}
+}
+
 // BenchmarkResolveCatalog measures a single hot-object resolve: one xref
 // record ReadAt plus lexing and parsing of a small dictionary.
 func BenchmarkResolveCatalog(b *testing.B) {
@@ -240,7 +307,7 @@ func BenchmarkResolveCatalog(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := d.DictGet(r, v, "Pages"); err != nil {
+		if _, err := d.DictGet(p, r, v, "Pages"); err != nil {
 			b.Fatal(err)
 		}
 	}

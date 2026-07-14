@@ -56,8 +56,12 @@ type Value struct {
 	I int64
 	// N is the raw byte length of the full token span, closing delimiter
 	// included. Zero for scalar kinds.
-	N    uint32
-	Ref  ObjectID // Referenced object for KindRef; zero otherwise.
+	N uint32
+	// Ref is the referenced object for KindRef. For span kinds parsed
+	// inside a compressed object stream (PDF 1.5+), Ref.Num instead
+	// identifies that object stream: I and N then address its
+	// decompressed data, not the file. Zero otherwise.
+	Ref  ObjectID
 	Kind Kind
 }
 

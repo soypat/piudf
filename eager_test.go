@@ -367,7 +367,7 @@ line) ]`)
 		t.Fatal(err)
 	}
 	for i := range n {
-		lv, err := d.ArrayIndex(r, la, i)
+		lv, err := d.ArrayIndex(p, r, la, i)
 		if err != nil {
 			t.Fatalf("lazy ArrayIndex(%d): %v", i, err)
 		}
@@ -375,7 +375,7 @@ line) ]`)
 		if err != nil {
 			t.Fatalf("eager ArrayIndex(%d): %v", i, err)
 		}
-		ls, err := d.AppendString(nil, r, lv)
+		ls, err := d.AppendString(nil, p, r, lv)
 		if err != nil {
 			t.Fatalf("lazy AppendString(%d): %v", i, err)
 		}

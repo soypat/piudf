@@ -17,12 +17,15 @@
 // file, keep the PDF struct and any Values, and later pass a reader over
 // the identical bytes to continue reading lazily.
 //
-// Compressed payloads (images, content streams) are never decoded:
-// RawStream exposes the raw bytes and the declared filter, and the caller
-// decides.
+// PDF 1.5+ cross-reference streams and compressed object streams are
+// supported: those structural streams are inflated internally, bounded by
+// DecodeLimits.MaxDecompress. Compressed payloads (images, content
+// streams) are never decoded: RawStream exposes the raw bytes and the
+// declared filter, and the caller decides.
 package piudf
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +68,12 @@ type DecodeLimits struct {
 	// DecodeEager: the entry pool (~32 bytes per dictionary pair or array
 	// element) and the object table. Unused by the lazy Decode path.
 	MaxEntries int
+	// MaxDecompress caps each internal FlateDecode output: the decoded
+	// cross-reference stream records kept per document, the object-stream
+	// cache and DecodeEager's interned string pool. It is a hard cap —
+	// Grow does not lift it — so compressed data cannot expand without
+	// bound. Unused for documents with classic xref tables.
+	MaxDecompress int
 	// Grow permits exceeding MaxXrefSections by reallocating.
 	Grow bool
 }
@@ -78,6 +87,7 @@ func DefaultDecodeLimits() DecodeLimits {
 		MaxParseDepth:   64,
 		MaxXrefSections: 128,
 		MaxEntries:      1 << 16,
+		MaxDecompress:   1 << 22,
 		Grow:            true,
 	}
 }
@@ -98,6 +108,9 @@ func (lim DecodeLimits) withDefaults() DecodeLimits {
 	}
 	if lim.MaxEntries <= 0 {
 		lim.MaxEntries = def.MaxEntries
+	}
+	if lim.MaxDecompress <= 0 {
+		lim.MaxDecompress = def.MaxDecompress
 	}
 	return lim
 }
@@ -133,14 +146,29 @@ type StreamInfo struct {
 // section descriptors and trailer metadata. It owns no object data — all
 // Values are file coordinates resolved against a reader passed per call.
 // A PDF holds no reference to the file or the Decoder that filled it.
-// Memory is O(number of xref subsections), independent of object count.
-// A PDF is not safe for concurrent use.
+//
+// For documents with classic xref tables, memory is O(number of xref
+// subsections), independent of object count. Documents using
+// cross-reference streams (PDF 1.5+) additionally keep the decoded xref
+// records (compressed data has no random access) and a cache holding one
+// decompressed object stream at a time, both capped by
+// DecodeLimits.MaxDecompress. A PDF is not safe for concurrent use.
 type PDF struct {
 	size     int64
 	lim      DecodeLimits
 	sections []xrefSection // Cross-reference sections, newest revision first.
 	trailer  trailerInfo
 	stats    Stats
+	// xbuf holds the decoded records of all cross-reference streams in the
+	// chain; sectStream sections address rows in it. Empty for classic
+	// tables.
+	xbuf []byte
+	// Object-stream cache: the decompressed contents of object stream
+	// stmNum, one stream at a time. stmNum 0 means empty.
+	stmNum   uint32
+	stmN     int   // /N: number of objects in the cached stream.
+	stmFirst int64 // /First: offset of the first object in stmbuf.
+	stmbuf   []byte
 	// recbuf backs single xref record reads; a struct field so the slice
 	// passed to the io.ReaderAt interface does not escape per lookup.
 	recbuf [classicRecLen]byte
@@ -151,19 +179,25 @@ type PDF struct {
 // length, since the backing memory is allocated either way.
 func (p *PDF) SizeOnRAM() int {
 	return int(unsafe.Sizeof(*p)) +
-		cap(p.sections)*int(unsafe.Sizeof(xrefSection{}))
+		cap(p.sections)*int(unsafe.Sizeof(xrefSection{})) +
+		cap(p.xbuf) +
+		cap(p.stmbuf)
 }
 
-// Decoder is the decoding machine: lexer and token pushback. The zero
-// value is ready for use. A Decoder retains no reference to any PDF it
-// decoded and is immediately reusable for another document; its memory
-// stays constant no matter how many documents it processes.
-// A Decoder is not safe for concurrent use.
+// Decoder is the decoding machine: lexer, token pushback and inflate
+// state. The zero value is ready for use. A Decoder retains no reference
+// to any PDF it decoded and is immediately reusable for another document;
+// its memory stays constant no matter how many documents it processes
+// (the zlib window, ~50 KB, is allocated once on first contact with
+// FlateDecode data). A Decoder is not safe for concurrent use.
 type Decoder struct {
 	lx       Lexer
 	pb       [2]tokval // Parser token pushback queue.
 	npb      int
-	maxDepth int // Nesting guard for span skipping; set by Decode.
+	maxDepth int          // Nesting guard for span skipping; set by Decode.
+	stmDepth int          // Object-stream /Length reference cycle guard.
+	zr       zlibReader   // Reusable inflater; nil until first use.
+	stmRdr   bytes.Reader // Reusable reader over a PDF's object-stream cache.
 }
 
 // Reset empties the document index, keeping allocated capacity for reuse.
@@ -172,6 +206,11 @@ func (p *PDF) Reset() {
 	p.sections = p.sections[:0]
 	p.trailer = trailerInfo{}
 	p.stats = Stats{}
+	p.xbuf = p.xbuf[:0]
+	p.stmNum = 0
+	p.stmN = 0
+	p.stmFirst = 0
+	p.stmbuf = p.stmbuf[:0]
 }
 
 // Decode initializes dst from r, which holds size bytes of PDF data. Only
@@ -225,6 +264,33 @@ func (d *Decoder) lexAt(r io.ReaderAt, off int64) error {
 	return d.lx.Reset(r, off)
 }
 
+// lexValueSpan positions the lexer at span v's first byte: in the file via
+// r, or — for Values tagged with an object stream (see Value.Ref) — inside
+// that stream's decompressed data, loading p's cache if needed.
+func (d *Decoder) lexValueSpan(p *PDF, r io.ReaderAt, v Value) error {
+	if !v.isSpan() || v.Ref.Num == 0 {
+		return d.lexAt(r, v.I)
+	}
+	if p == nil || p.size == 0 {
+		return errNotDecoded
+	}
+	if err := d.loadObjStm(p, r, v.Ref.Num); err != nil {
+		return fmt.Errorf("in object stream %d: %w", v.Ref.Num, err)
+	}
+	return d.lexStmAt(p, v.I)
+}
+
+// tagObjStm marks span Values parsed inside object stream stm so accessors
+// know their coordinates address its decompressed data, not the file.
+// Scalars and references pass through untouched; stm 0 (file space) is the
+// identity.
+func tagObjStm(v Value, stm uint32) Value {
+	if stm != 0 && v.isSpan() {
+		v.Ref = ObjectID{Num: stm}
+	}
+	return v
+}
+
 // Trailer lazily re-parses and returns the newest trailer dictionary of p
 // as a file-span Value.
 func (d *Decoder) Trailer(p *PDF, r io.ReaderAt) (Value, error) {
@@ -262,7 +328,11 @@ func (d *Decoder) Resolve(p *PDF, r io.ReaderAt, id ObjectID) (Value, error) {
 	case recFree:
 		return Value{}, fmt.Errorf("%w: %v is free", ErrObjectNotFound, id)
 	case recCompressed:
-		return Value{}, fmt.Errorf("%w: %v is in an object stream", ErrUnsupported, id)
+		// Objects in object streams always have generation 0.
+		if id.Gen != 0 {
+			return Value{}, fmt.Errorf("%w: %v generation mismatch (have 0)", ErrObjectNotFound, id)
+		}
+		return d.resolveCompressed(p, r, id, rec)
 	}
 	if rec.gen != id.Gen {
 		return Value{}, fmt.Errorf("%w: %v generation mismatch (have %d)", ErrObjectNotFound, id, rec.gen)
@@ -333,14 +403,17 @@ func (d *Decoder) parseObjectAt(r io.ReaderAt, off int64, id ObjectID) (Value, e
 	return Value{Kind: KindStream, I: v.I, N: v.N}, nil
 }
 
-// DictGet returns the value for key in dictionary (or stream dict) v by
-// re-lexing its span from r. A missing key yields a null Value and no
-// error, matching PDF semantics. Cost is one scan of the raw dict text.
-func (d *Decoder) DictGet(r io.ReaderAt, v Value, key string) (Value, error) {
+// DictGet returns the value for key in dictionary (or stream dict) dictVal
+// by re-lexing its span — from r, or from p's object-stream cache when the
+// dictionary lives inside an object stream. A missing key yields a null
+// Value and no error, matching PDF semantics. Cost is one scan of the raw
+// dict text.
+func (d *Decoder) DictGet(p *PDF, r io.ReaderAt, dictVal Value, key string) (Value, error) {
+	v := dictVal
 	if v.Kind != KindDict && v.Kind != KindStream {
 		return Value{}, errKindMismatch
 	}
-	if err := d.lexAt(r, v.I); err != nil {
+	if err := d.lexValueSpan(p, r, v); err != nil {
 		return Value{}, err
 	}
 	tok, pos, _ := d.lx.NextToken()
@@ -365,7 +438,7 @@ func (d *Decoder) DictGet(r io.ReaderAt, v Value, key string) (Value, error) {
 				return Value{}, err
 			}
 			if match {
-				return val, nil
+				return tagObjStm(val, v.Ref.Num), nil
 			}
 		default:
 			return Value{}, &SyntaxError{Off: tv.pos, Msg: "expected name as dictionary key"}
@@ -373,15 +446,17 @@ func (d *Decoder) DictGet(r io.ReaderAt, v Value, key string) (Value, error) {
 	}
 }
 
-// ArrayIndex returns element i of array v by scanning its span: cost O(i).
-func (d *Decoder) ArrayIndex(r io.ReaderAt, v Value, i int) (Value, error) {
+// ArrayIndex returns element i of array arrVal by scanning its span: cost
+// O(i).
+func (d *Decoder) ArrayIndex(p *PDF, r io.ReaderAt, arrVal Value, i int) (Value, error) {
+	v := arrVal
 	if v.Kind != KindArray {
 		return Value{}, errKindMismatch
 	}
 	if i < 0 {
 		return Value{}, errors.New("piudf: negative array index")
 	}
-	if err := d.lexAt(r, v.I); err != nil {
+	if err := d.lexValueSpan(p, r, v); err != nil {
 		return Value{}, err
 	}
 	tok, pos, _ := d.lx.NextToken()
@@ -402,17 +477,18 @@ func (d *Decoder) ArrayIndex(r io.ReaderAt, v Value, i int) (Value, error) {
 			return Value{}, err
 		}
 		if n == i {
-			return elem, nil
+			return tagObjStm(elem, v.Ref.Num), nil
 		}
 	}
 }
 
-// ArrayLen returns the element count of array v by scanning its span.
-func (d *Decoder) ArrayLen(r io.ReaderAt, v Value) (int, error) {
+// ArrayLen returns the element count of array arrVal by scanning its span.
+func (d *Decoder) ArrayLen(p *PDF, r io.ReaderAt, arrVal Value) (int, error) {
+	v := arrVal
 	if v.Kind != KindArray {
 		return 0, errKindMismatch
 	}
-	if err := d.lexAt(r, v.I); err != nil {
+	if err := d.lexValueSpan(p, r, v); err != nil {
 		return 0, err
 	}
 	tok, pos, _ := d.lx.NextToken()
@@ -434,13 +510,14 @@ func (d *Decoder) ArrayLen(r io.ReaderAt, v Value) (int, error) {
 	}
 }
 
-// NameIs reports whether v is a name equal to s, decoding #xx escapes on
-// the fly. It allocates nothing.
-func (d *Decoder) NameIs(r io.ReaderAt, v Value, s string) bool {
+// NameIs reports whether nameVal is a name equal to s, decoding #xx
+// escapes on the fly. It allocates nothing.
+func (d *Decoder) NameIs(p *PDF, r io.ReaderAt, nameVal Value, s string) bool {
+	v := nameVal
 	if v.Kind != KindName {
 		return false
 	}
-	if err := d.lexAt(r, v.I); err != nil {
+	if err := d.lexValueSpan(p, r, v); err != nil {
 		return false
 	}
 	tok, _, lit := d.lx.NextToken()
@@ -448,15 +525,16 @@ func (d *Decoder) NameIs(r io.ReaderAt, v Value, s string) bool {
 }
 
 // AppendString re-reads and unescapes the payload of a string, hex string
-// or name Value, appending the decoded bytes to dst. Values store raw file
+// or name Value, appending the decoded bytes to dst. Values store raw
 // spans, so this is the only point that copies text data.
-func (d *Decoder) AppendString(dst []byte, r io.ReaderAt, v Value) ([]byte, error) {
+func (d *Decoder) AppendString(dst []byte, p *PDF, r io.ReaderAt, strVal Value) ([]byte, error) {
+	v := strVal
 	switch v.Kind {
 	case KindString, KindHexString, KindName:
 	default:
 		return dst, errKindMismatch
 	}
-	if err := d.lexAt(r, v.I); err != nil {
+	if err := d.lexValueSpan(p, r, v); err != nil {
 		return dst, err
 	}
 	tok, _, lit := d.lx.NextToken()
@@ -477,7 +555,7 @@ func (d *Decoder) RawStream(p *PDF, r io.ReaderAt, v Value) (*io.SectionReader, 
 	if v.Kind != KindStream {
 		return nil, info, errKindMismatch
 	}
-	filterV, err := d.DictGet(r, v, "Filter")
+	filterV, err := d.DictGet(p, r, v, "Filter")
 	if err != nil {
 		return nil, info, err
 	}
@@ -485,12 +563,12 @@ func (d *Decoder) RawStream(p *PDF, r io.ReaderAt, v Value) (*io.SectionReader, 
 	case KindName:
 		info.Filter = filterV
 	case KindArray:
-		first, err := d.ArrayIndex(r, filterV, 0)
+		first, err := d.ArrayIndex(p, r, filterV, 0)
 		if err == nil && first.Kind == KindName {
 			info.Filter = first
 		}
 	}
-	lengthV, err := d.DictGet(r, v, "Length")
+	lengthV, err := d.DictGet(p, r, v, "Length")
 	if err != nil {
 		return nil, info, err
 	}
