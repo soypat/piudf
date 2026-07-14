@@ -137,9 +137,10 @@ func atoiFixed(b []byte) (int64, bool) {
 }
 
 // findStartXref locates the cross-reference offset advertised in the file
-// tail: ... startxref <offset> %%EOF.
-func findStartXref(r io.ReaderAt, size int64) (int64, error) {
-	var tail [1024]byte
+// tail: ... startxref <offset> %%EOF. The Decoder's iobuf backs the read
+// so nothing escapes to the heap.
+func (d *Decoder) findStartXref(r io.ReaderAt, size int64) (int64, error) {
+	tail := d.iobuf[:]
 	n := int64(len(tail))
 	if size < n {
 		n = size
@@ -310,16 +311,12 @@ func (d *Decoder) readCodec(p *PDF, r io.ReaderAt, dictVal Value) (streamCodec, 
 	if pv.Kind != KindDict {
 		return c, nil
 	}
-	for _, f := range [...]struct {
-		key string
-		dst *int
-	}{
-		{"Predictor", &c.predictor},
-		{"Columns", &c.columns},
-		{"Colors", &c.colors},
-		{"BitsPerComponent", &c.bpc},
-	} {
-		v, err := d.DictGet(p, r, pv, f.key)
+	// No pointers into c here: they would force the returned struct to
+	// escape to the heap on every call.
+	keys := [4]string{"Predictor", "Columns", "Colors", "BitsPerComponent"}
+	vals := [4]int{c.predictor, c.columns, c.colors, c.bpc}
+	for i, key := range keys {
+		v, err := d.DictGet(p, r, pv, key)
 		if err != nil {
 			return c, err
 		}
@@ -328,10 +325,11 @@ func (d *Decoder) readCodec(p *PDF, r io.ReaderAt, dictVal Value) (streamCodec, 
 		}
 		n, err := v.Int()
 		if err != nil {
-			return c, fmt.Errorf("%w: /DecodeParms /%s is not an integer", ErrCorrupt, f.key)
+			return c, fmt.Errorf("%w: /DecodeParms /%s is not an integer", ErrCorrupt, key)
 		}
-		*f.dst = int(n)
+		vals[i] = int(n)
 	}
+	c.predictor, c.columns, c.colors, c.bpc = vals[0], vals[1], vals[2], vals[3]
 	return c, nil
 }
 
@@ -445,8 +443,8 @@ func (d *Decoder) readXrefStream(p *PDF, r io.ReaderAt, off int64) (prev int64, 
 	xstart := len(p.xbuf)
 	budget := p.lim.MaxDecompress - xstart
 	if codec.flate {
-		sr := io.NewSectionReader(r, int64(dataStart), length)
-		p.xbuf, err = d.inflate(p.xbuf, sr, budget, p.lim.Grow)
+		d.spanRdr.set(r, int64(dataStart), length)
+		p.xbuf, err = d.inflate(p.xbuf, &d.spanRdr, budget, p.lim.Grow)
 		if err != nil {
 			return 0, fmt.Errorf("xref stream at %#x: %w", off, err)
 		}

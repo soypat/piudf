@@ -25,6 +25,7 @@
 package piudf
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -194,10 +195,16 @@ type Decoder struct {
 	lx       Lexer
 	pb       [2]tokval // Parser token pushback queue.
 	npb      int
-	maxDepth int          // Nesting guard for span skipping; set by Decode.
-	stmDepth int          // Object-stream /Length reference cycle guard.
-	zr       zlibReader   // Reusable inflater; nil until first use.
-	stmRdr   bytes.Reader // Reusable reader over a PDF's object-stream cache.
+	maxDepth int           // Nesting guard for span skipping; set by Decode.
+	stmDepth int           // Object-stream /Length reference cycle guard.
+	zr       zlibReader    // Reusable inflater; nil until first use.
+	zsrc     *bufio.Reader // Reusable inflate source; zlib needs a ByteReader.
+	spanRdr  spanReader    // Reusable file-span source for internal inflates.
+	stmRdr   bytes.Reader  // Reusable reader over a PDF's object-stream cache.
+	// iobuf backs the header and file-tail reads of Decode and inflate's
+	// end-of-stream probe (all disjoint in time); a struct field so the
+	// slices passed through io interfaces do not escape.
+	iobuf [1024]byte
 }
 
 // Reset empties the document index, keeping allocated capacity for reuse.
@@ -236,12 +243,12 @@ func (d *Decoder) Decode(dst *PDF, r io.ReaderAt, size int64, lim DecodeLimits) 
 	d.maxDepth = lim.MaxParseDepth
 	d.npb = 0
 
-	var header [8]byte
-	n, err := r.ReadAt(header[:], 0)
+	header := d.iobuf[:8]
+	n, err := r.ReadAt(header, 0)
 	if n < 5 || string(header[:5]) != "%PDF-" {
 		return fmt.Errorf("%w: missing %%PDF- header (read %d: %v)", ErrCorrupt, n, err)
 	}
-	xrefOff, err := findStartXref(r, size)
+	xrefOff, err := d.findStartXref(r, size)
 	if err != nil {
 		return err
 	}
@@ -550,14 +557,26 @@ func (d *Decoder) AppendString(dst []byte, p *PDF, r io.ReaderAt, strVal Value) 
 // Filter tells the caller what encoding the bytes are in. The payload
 // offset is re-derived by lexing the 'stream' keyword after the dict span.
 func (d *Decoder) RawStream(p *PDF, r io.ReaderAt, v Value) (*io.SectionReader, StreamInfo, error) {
+	info, err := d.streamInfo(p, r, v)
+	if err != nil {
+		return nil, info, err
+	}
+	return io.NewSectionReader(r, info.Offset, info.Length), info, nil
+}
+
+// streamInfo locates stream object v's payload and filter without
+// constructing a reader; the allocation-free core of RawStream, used
+// internally where the payload is consumed through the Decoder's own
+// reusable span reader.
+func (d *Decoder) streamInfo(p *PDF, r io.ReaderAt, v Value) (StreamInfo, error) {
 	var info StreamInfo
 	info.Filter = Value{Kind: KindNull}
 	if v.Kind != KindStream {
-		return nil, info, errKindMismatch
+		return info, errKindMismatch
 	}
 	filterV, err := d.DictGet(p, r, v, "Filter")
 	if err != nil {
-		return nil, info, err
+		return info, err
 	}
 	switch filterV.Kind {
 	case KindName:
@@ -570,32 +589,32 @@ func (d *Decoder) RawStream(p *PDF, r io.ReaderAt, v Value) (*io.SectionReader, 
 	}
 	lengthV, err := d.DictGet(p, r, v, "Length")
 	if err != nil {
-		return nil, info, err
+		return info, err
 	}
 	lengthV, err = d.ResolveRef(p, r, lengthV, 1)
 	if err != nil {
-		return nil, info, fmt.Errorf("resolving stream /Length: %w", err)
+		return info, fmt.Errorf("resolving stream /Length: %w", err)
 	}
 	length, err := lengthV.Int()
 	if err != nil {
-		return nil, info, fmt.Errorf("%w: stream /Length is %v", ErrCorrupt, lengthV.Kind)
+		return info, fmt.Errorf("%w: stream /Length is %v", ErrCorrupt, lengthV.Kind)
 	}
 	// Locate the payload: the 'stream' keyword follows the dict span.
 	if err := d.lexAt(r, v.I+int64(v.N)); err != nil {
-		return nil, info, err
+		return info, err
 	}
 	tok, pos, _ := d.lx.NextToken()
 	if tok != TokStream {
-		return nil, info, &SyntaxError{Off: pos, Msg: "expected 'stream' keyword after stream dictionary"}
+		return info, &SyntaxError{Off: pos, Msg: "expected 'stream' keyword after stream dictionary"}
 	}
 	dataStart, err := d.lx.StreamDataStart()
 	if err != nil {
-		return nil, info, err
+		return info, err
 	}
 	info.Offset = int64(dataStart)
 	if length < 0 || info.Offset > math.MaxInt64-length || info.Offset+length > p.size {
-		return nil, info, fmt.Errorf("%w: stream payload [%#x, +%d) outside file", ErrCorrupt, info.Offset, length)
+		return info, fmt.Errorf("%w: stream payload [%#x, +%d) outside file", ErrCorrupt, info.Offset, length)
 	}
 	info.Length = length
-	return io.NewSectionReader(r, info.Offset, length), info, nil
+	return info, nil
 }

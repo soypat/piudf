@@ -38,7 +38,7 @@ func main() {
 	var d piudf.Decoder
 	var p piudf.PDF
 	lazytimer := timer()
-	if err := d.Decode(&p, f, st.Size(), piudf.DecodeLimits{}); err != nil {
+	if err := d.Decode(&p, ReaderAtPrinter{f}, st.Size(), piudf.DecodeLimits{}); err != nil {
 		log.Fatal("lazy Decode: ", err)
 	}
 	lazyElapsed := lazytimer()

@@ -67,10 +67,10 @@ func (d *Decoder) loadObjStm(p *PDF, r io.ReaderAt, num uint32) error {
 	if nObjs < 0 || first < 0 {
 		return fmt.Errorf("%w: object stream %d /N %d /First %d", ErrCorrupt, num, nObjs, first)
 	}
-	// RawStream resolves /Length, which may itself be a reference into
+	// streamInfo resolves /Length, which may itself be a reference into
 	// another object stream; the cache is marked invalid above exactly so
 	// that such a detour cannot be mistaken for this stream's data.
-	sr, info, err := d.RawStream(p, r, sv)
+	info, err := d.streamInfo(p, r, sv)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,8 @@ func (d *Decoder) loadObjStm(p *PDF, r io.ReaderAt, num uint32) error {
 
 	p.stmbuf = p.stmbuf[:0]
 	if codec.flate {
-		p.stmbuf, err = d.inflate(p.stmbuf, sr, p.lim.MaxDecompress, p.lim.Grow)
+		d.spanRdr.set(r, info.Offset, info.Length)
+		p.stmbuf, err = d.inflate(p.stmbuf, &d.spanRdr, p.lim.MaxDecompress, p.lim.Grow)
 		if err != nil {
 			return fmt.Errorf("object stream %d: %w", num, err)
 		}
