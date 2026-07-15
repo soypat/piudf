@@ -170,9 +170,20 @@ type PDF struct {
 	stmN     int   // /N: number of objects in the cached stream.
 	stmFirst int64 // /First: offset of the first object in stmbuf.
 	stmbuf   []byte
+	// revs records one entry per cross-reference chain step, newest first,
+	// backing the Revision introspection API. Bounded by maxXrefChain.
+	revs []revInfo
 	// recbuf backs single xref record reads; a struct field so the slice
 	// passed to the io.ReaderAt interface does not escape per lookup.
 	recbuf [classicRecLen]byte
+}
+
+// revInfo is one cross-reference chain step recorded during Decode.
+type revInfo struct {
+	xrefOff      int64
+	trailerOff   int64
+	firstSection int
+	classic      bool
 }
 
 // SizeOnRAM returns the total bytes of memory held by p: the struct itself
@@ -181,6 +192,7 @@ type PDF struct {
 func (p *PDF) SizeOnRAM() int {
 	return int(unsafe.Sizeof(*p)) +
 		cap(p.sections)*int(unsafe.Sizeof(xrefSection{})) +
+		cap(p.revs)*int(unsafe.Sizeof(revInfo{})) +
 		cap(p.xbuf) +
 		cap(p.stmbuf)
 }
@@ -213,6 +225,7 @@ func (p *PDF) Reset() {
 	p.sections = p.sections[:0]
 	p.trailer = trailerInfo{}
 	p.stats = Stats{}
+	p.revs = p.revs[:0]
 	p.xbuf = p.xbuf[:0]
 	p.stmNum = 0
 	p.stmN = 0

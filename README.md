@@ -140,6 +140,50 @@ Objects that exceed `MaxEntries` or fail to parse are dropped individually
 document decodes; only structural failures (header, xref chain, trailer)
 fail `DecodeEager` itself.
 
+## CLI: binary-level PDF explorer
+
+`cmd/piudf` explores a file's layout through the lazy decoder — nothing is
+materialized, and everything printed carries exact file coordinates
+(`@offset+len`, or `@objstmN:offset+len` inside a compressed object
+stream). In the spirit of `mutool show`, `qpdf --show-*`, `pdf-parser.py`
+and `readelf`.
+
+```sh
+go install github.com/soypat/piudf/cmd/piudf@latest
+piudf <command> <file.pdf> [args] [flags]
+```
+
+| command | shows |
+|---|---|
+| `info` | version, xref form, revisions, object counts by kind |
+| `trailer`, `obj <n>` | annotated value trees |
+| `ls` | every object: kind + location (file offset or objstm) |
+| `xref` | subsections and records, shadowing marked |
+| `map` | byte-range map of the whole file, gaps included |
+| `revisions` | incremental-update history, oldest first |
+| `stream <n>`, `raw`, `lex <off>` | payload info/hexdumps, token stream |
+| `walk /Root/Pages/Kids/0` | path navigation with per-hop coordinates |
+| `mem` | index memory footprint |
+
+```
+$ piudf walk doc.pdf /Root/Pages/Kids/0
+trailer @0x77a26c+187
+/Root -> ref
+  = 2 0 R dict @0x12 @0x1a+178
+/Pages -> ref
+  = 1 0 R dict objstm 15815[0] @objstm15815:0x76b+11072
+/Kids -> array @objstm15815:0x77d+11041
+/0 -> ref
+  = 3 0 R dict objstm 15815[2] @objstm15815:0x3431+270
+dict[9] @objstm15815:0x3431+270
+  /Type /Page
+  ...
+```
+
+The introspection API behind it (`PDF.Lookup`, `XrefSection`, `Revision`,
+`Decoder.ParseValueAt`, `DictLen`/`DictIndex`) is exported in `explore.go`
+for building similar tools.
+
 ## Status / roadmap
 
 Supported now: classic cross-reference tables and PDF 1.5+ cross-reference

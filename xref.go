@@ -182,6 +182,9 @@ func (d *Decoder) readXrefChain(p *PDF, r io.ReaderAt, startOff int64) error {
 		if off < 0 || off >= p.size {
 			return fmt.Errorf("%w: xref offset %#x out of file bounds", ErrCorrupt, off)
 		}
+		// One revision descriptor per chain step; readXrefTable and
+		// readXrefStream fill in the trailer offset and form.
+		p.revs = append(p.revs, revInfo{xrefOff: off, firstSection: len(p.sections)})
 		prev, err := d.readXrefTable(p, r, off)
 		if err != nil {
 			return err
@@ -363,6 +366,9 @@ func (d *Decoder) readXrefStream(p *PDF, r io.ReaderAt, off int64) (prev int64, 
 	}
 	if dictV.Kind != KindDict {
 		return 0, fmt.Errorf("%w: cross-reference stream without dictionary at %#x", ErrCorrupt, off)
+	}
+	if n := len(p.revs); n > 0 {
+		p.revs[n-1].trailerOff = dictV.I // The stream dict is the trailer.
 	}
 	tv, err := d.next()
 	if err != nil {
@@ -575,6 +581,10 @@ func (d *Decoder) readTrailer(p *PDF, r io.ReaderAt) (prev int64, err error) {
 	}
 	if v.Kind != KindDict {
 		return 0, fmt.Errorf("%w: trailer is not a dictionary at %#x", ErrCorrupt, trailerOff)
+	}
+	if n := len(p.revs); n > 0 {
+		p.revs[n-1].trailerOff = trailerOff
+		p.revs[n-1].classic = true
 	}
 	if p.trailer.off == 0 {
 		p.trailer.off = trailerOff // Newest trailer wins for Trailer().
