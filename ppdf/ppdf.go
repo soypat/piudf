@@ -1,0 +1,285 @@
+package ppdf
+
+import (
+	"errors"
+	"io"
+	"strconv"
+	"strings"
+	"unsafe"
+
+	"github.com/soypat/piudf/ppdf/piulex"
+)
+
+//go:generate go tool stringer -type=genericErr -linecomment -output=stringers.go
+
+type genericErr uint8
+
+const (
+	_                     genericErr = iota
+	ErrMissingHeader                 // missing %PDF- header
+	ErrMissingStartXref              // missing startxref
+	ErrMalformedStartXref            // malformed startxref
+	ErrIncompleteReadAt              // ReadAt did incomplete read
+	ErrOOBXref                       // xref offset out of file bounds
+	ErrCodecMemLimit                 // Codec memory limit hit
+	ErrCodecDepthLimit               // Codec depth limit hit
+	ErrInvalidCodecConfig            // Codec invalid config
+
+	// Lexer errors below.
+	_errLexErrorsStart //
+
+	ErrIllegalToken                 // illegal token
+	ErrPrevLoop                     // /Prev loop found
+	errPrevChainTooLong             // /Prev chain too long
+	errExpectedXref                 // expected 'xref' keyword
+	errBadSubsectionStart           // bad subsection start/entry
+	errExpectingSubsectionOrTrailer // unexpected token looking for subsections or trailer
+	errBadXrefStreamObjectHeader    // bad xref stream object header
+	errUnexpectedEOF
+)
+
+func (g genericErr) Error() string { return g.Error() }
+
+// IsLexed signals the error was encountered during lexing, so the [piulex.Lexer]
+// has state on where the error was encountered in Pos and Error methods.
+func (g genericErr) IsLexed() bool { return g > _errLexErrorsStart }
+
+type PDF struct {
+	sections []xrefSection
+	revs     []revInfo
+}
+
+// xrefSection describes one cross-reference subsection without materializing
+// its entries. Classic on-disk tables are already random-access arrays of
+// fixed-width records, so lookups read single records via ReadAt; the
+// decoded rows of a cross-reference stream live in PDF.xbuf and are read
+// from memory. Memory cost is O(number of subsections) plus, for streams,
+// the decoded rows.
+type xrefSection struct {
+	firstObj uint32
+	count    uint32
+	fileOff  int64    // sectClassic: file offset of the first record. sectStream: offset into PDF.xbuf.
+	w        [3]uint8 // Field widths; classic is {10, 5, 1}, streams use /W.
+
+	isXrefStream bool
+}
+
+// revInfo is one cross-reference chain step recorded during Decode.
+type revInfo struct {
+	xrefOff      int64
+	trailerOff   int64
+	firstSection int
+	classic      bool
+}
+
+func (pdf *PDF) Reset() {
+	pdf.sections = pdf.sections[:0]
+	pdf.revs = pdf.revs[:0]
+}
+
+func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
+	err := codec.Validate()
+	if err != nil {
+		return err
+	}
+	buf := codec.buf
+	pdf.Reset()
+	header := buf[:5]
+	n, err := readAtFull(r, header, 0)
+	if err != nil {
+		return err
+	} else if !bcmp(header, "%PDF-") {
+		return ErrMissingHeader
+	}
+
+	// Look for startxref string.
+	tail := buf
+	readlim := min(size, int64(len(buf)))
+	n, err = readAtFull(r, tail, size-readlim)
+	if err != nil {
+		return err
+	}
+	tail = tail[:n]
+	const startxref = "startxref"
+	i := blastidx(tail, startxref)
+	if i < 0 {
+		return ErrMissingStartXref
+	}
+	i += len(startxref)
+	i += countWhitespace(tail[i:])
+	off, n, err := consumeInt(tail[i:])
+	i += n
+	if err != nil {
+		return ErrMalformedStartXref
+	}
+	// Walk the xref chain starting at startxref.
+	const maxXrefChain = 64
+	for range maxXrefChain {
+		if off < 0 || off >= size {
+			return ErrOOBXref
+		}
+		pdf.revs = append(pdf.revs, revInfo{xrefOff: off, firstSection: len(pdf.sections)})
+		prev, err := pdf.decodeXrefTable(r, off, codec)
+		if err != nil {
+			return err
+		} else if prev == 0 {
+			return nil // Done!
+		} else if prev == off {
+			return ErrPrevLoop
+		}
+		off = prev
+	}
+	return errPrevChainTooLong
+}
+
+// classicRecLen is the record length mandated by ISO 32000-1 7.5.4:
+// 10-digit offset, space, 5-digit generation, space, keyword, 2-byte EOL.
+const classicRecLen = 20
+
+func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
+	lx := &codec.lex
+	if err = lx.Reset(r, off); err != nil {
+		return 0, err
+	}
+	tok, _, _ := lx.NextToken()
+	if tok == piulex.TokInt {
+		// An "N G obj" header here means a cross-reference stream.
+		return pdf.decodeXrefStream(r, off, codec)
+	}
+	if tok != piulex.TokXref {
+		return 0, errExpectedXref
+	}
+	for len(pdf.sections) < codec.MaxLazySections {
+		tok, _, lit := lx.NextToken()
+		switch tok {
+		case piulex.TokTrailer:
+			return 0, nil // TODO get root/info/size data.
+		case piulex.TokInt:
+			first, _, err := consumeInt(lit)
+			if err != nil {
+				return 0, errBadSubsectionStart
+			}
+			tok, _, lit = lx.NextToken()
+			count, _, err := consumeInt(lit)
+			if err != nil {
+				return 0, errBadSubsectionStart
+			}
+			// Advance lexer position to start of record.
+			lx.SkipWhitespace()
+			recOff := int64(lx.Pos())
+			if count > 0 {
+				sec := xrefSection{
+					firstObj:     uint32(first),
+					count:        uint32(count),
+					fileOff:      recOff,
+					w:            [3]uint8{10, 5, 1},
+					isXrefStream: false,
+				}
+				pdf.sections = append(pdf.sections, sec)
+			}
+			// Jump over the fixed-width record area instead of tokenizing it.
+			if err := lx.Reset(r, recOff+classicRecLen*count); err != nil {
+				return 0, err
+			}
+		default:
+			return 0, errExpectingSubsectionOrTrailer
+		}
+	}
+	return 0, ErrCodecMemLimit
+}
+
+func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
+	if err = codec.lexAt(r, off); err != nil {
+		return 0, err
+	}
+	numTv := codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader)
+	genTv := codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader)
+	objTv := codec.nextValue(piulex.TokObj, errBadXrefStreamObjectHeader)
+	if codec.accumErr != nil {
+		return 0, codec.accumErr
+	}
+	return 0, errors.New("piudf: xref streams unsupported")
+}
+
+func readAtFull(r io.ReaderAt, b []byte, off int64) (int, error) {
+	n, err := r.ReadAt(b, off)
+	if err != nil {
+		return n, err
+	} else if n != len(b) {
+		return n, ErrIncompleteReadAt
+	}
+	return n, nil
+}
+
+func bcmp(b []byte, s string) bool {
+	return b2s(b) == s
+}
+
+func blastidx(b []byte, needle string) int {
+	return strings.LastIndex(b2s(b), needle)
+}
+
+func b2s(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
+}
+
+func consumeInt(b []byte) (int64, int, error) {
+	i := 0
+	for i < len(b) && isDigit(b[i]) {
+		i++
+	}
+	v, err := parseInt(b[:i])
+	return v, i, err
+}
+
+func parseInt(b []byte) (int64, error) {
+	return strconv.ParseInt(b2s(b), 10, 64)
+}
+
+func parseReal(b []byte) (float64, error) {
+	return strconv.ParseFloat(b2s(b), 64)
+}
+
+func countWhitespace(b []byte) int {
+	i := 0
+	for i < len(b) && isWhitespace(b[i]) {
+		i++
+	}
+	return i
+}
+
+// isWhitespace reports PDF whitespace bytes (ISO 32000-1 Table 1).
+func isWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == 0
+}
+
+// isDelimiter reports PDF delimiter bytes (ISO 32000-1 Table 2).
+func isDelimiter(b byte) bool {
+	switch b {
+	case '(', ')', '<', '>', '[', ']', '{', '}', '/', '%':
+		return true
+	}
+	return false
+}
+
+// isRegular reports bytes that may appear in names and bare keywords.
+func isRegular(b byte) bool {
+	return !isWhitespace(b) && !isDelimiter(b)
+}
+
+func isDigit(b byte) bool { return '0' <= b && b <= '9' }
+
+func hexVal(b byte) (v byte, ok bool) {
+	switch {
+	case '0' <= b && b <= '9':
+		return b - '0', true
+	case 'a' <= b && b <= 'f':
+		return b - 'a' + 10, true
+	case 'A' <= b && b <= 'F':
+		return b - 'A' + 10, true
+	}
+	return 0, false
+}
