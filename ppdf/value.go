@@ -1,6 +1,7 @@
 package ppdf
 
 import (
+	"math"
 	"strconv"
 
 	"github.com/soypat/piudf/ppdf/piulex"
@@ -36,12 +37,68 @@ type Value struct {
 	//  - Name/String/Stream/HexString: Stores span/length of data.
 	//  - Ref: Stores Num.
 	N   uint32
+	Stm uint32 // TODO: can this be collapsed into N with Tok information? The less state there is the easier it is to keep "safe"
 	Tok piulex.Token
 }
 
 func (v Value) ObjectID() ObjectID {
 	if v.Tok != piulex.TokR {
-		panic("invalid use of ObjectID")
+		return ObjectID{}
 	}
 	return ObjectID{Num: v.N, Gen: uint16(v.I)}
+}
+
+// isSpan reports whether v addresses a raw file span.
+func (v Value) isSpan() bool {
+	switch v.Tok {
+	case piulex.TokHexString, piulex.TokString, piulex.TokName, tokArray, tokDict, tokStream:
+		return true
+	}
+	return false
+}
+
+// tagObjStm marks span Values parsed inside object stream stm so accessors
+// know their coordinates address its decompressed data, not the file.
+// Scalars and references pass through untouched; stm 0 (file space) is the
+// identity.
+func tagObjStm(v Value, stm uint32) Value {
+	if stm != 0 && v.isSpan() {
+		v.Stm = stm
+	}
+	return v
+}
+
+// Bool returns the boolean contained in v.
+func (v Value) Bool() (b bool, ok bool) {
+	b = v.Tok == piulex.TokTrue
+	return b, b || v.Tok == piulex.TokFalse
+}
+
+// Int returns the integer contained in v.
+func (v Value) Int() (_ int64, ok bool) {
+	return v.I, v.Tok == piulex.TokInt
+}
+
+// IsNull reports whether v is the PDF null object or an invalid Value.
+func (v Value) IsNull() bool { return v.Tok == piulex.TokNull || v.Tok <= piulex.TokEOF }
+
+// IsTruthy returns true if either are true:
+//   - value is true token
+//   - v.I is nonzero and non-null.
+func (v Value) IsTruthy() bool {
+	return v.Tok == piulex.TokTrue || (v.Tok != piulex.TokFalse && v.I != 0 && !v.IsNull())
+}
+
+// Float returns the numeric value contained in v. PDF permits integers
+// wherever a real number is expected so both kinds convert.
+func (v Value) Float() (f float64, ok bool) {
+	switch v.Tok {
+	case piulex.TokReal:
+		f = math.Float64frombits(uint64(v.I))
+	case piulex.TokInt:
+		f = math.Float64frombits(uint64(v.I))
+	default:
+		return math.NaN(), false
+	}
+	return f, true
 }

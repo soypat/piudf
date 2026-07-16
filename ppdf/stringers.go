@@ -14,19 +14,26 @@ func _() {
 	_ = x[ErrIncompleteReadAt-4]
 	_ = x[ErrOOBXref-5]
 	_ = x[ErrCodecMemLimit-6]
-	_ = x[ErrInvalidCodecConfig-7]
-	_ = x[_errLexErrorsStart-8]
-	_ = x[ErrIllegalToken-9]
-	_ = x[ErrPrevLoop-10]
-	_ = x[errPrevChainTooLong-11]
-	_ = x[errExpectedXref-12]
-	_ = x[errBadSubsectionStart-13]
-	_ = x[errExpectingSubsectionOrTrailer-14]
+	_ = x[ErrCodecDepthLimit-7]
+	_ = x[ErrInvalidCodecConfig-8]
+	_ = x[_errLexErrorsStart-9]
+	_ = x[errXrefStreamBad-10]
+	_ = x[errXrefStreamMissingDict-11]
+	_ = x[errXrefStreamMissingTok-12]
+	_ = x[ErrIllegalToken-13]
+	_ = x[errUnexpectedToken-14]
+	_ = x[ErrPrevLoop-15]
+	_ = x[errPrevChainTooLong-16]
+	_ = x[errExpectedXref-17]
+	_ = x[errBadSubsectionStart-18]
+	_ = x[errExpectingSubsectionOrTrailer-19]
+	_ = x[errBadXrefStreamObjectHeader-20]
+	_ = x[errUnexpectedEOF-21]
 }
 
-const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec invalid configillegal token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailer"
+const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headererrUnexpectedEOF"
 
-var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 154, 154, 167, 183, 203, 226, 252, 303}
+var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 175, 200, 224, 260, 273, 289, 305, 325, 348, 374, 425, 454, 470}
 
 func (i genericErr) String() string {
 	idx := int(i) - 1

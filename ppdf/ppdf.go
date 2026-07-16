@@ -3,6 +3,7 @@ package ppdf
 import (
 	"errors"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -26,9 +27,12 @@ const (
 	ErrInvalidCodecConfig            // Codec invalid config
 
 	// Lexer errors below.
-	_errLexErrorsStart //
-
+	_errLexErrorsStart              //
+	errXrefStreamBad                // xref stream generic error
+	errXrefStreamMissingDict        // xref stream missing dict
+	errXrefStreamMissingTok         // xref stream missing 'stream' keyword
 	ErrIllegalToken                 // illegal token
+	errUnexpectedToken              // unexpected token
 	ErrPrevLoop                     // /Prev loop found
 	errPrevChainTooLong             // /Prev chain too long
 	errExpectedXref                 // expected 'xref' keyword
@@ -47,6 +51,7 @@ func (g genericErr) IsLexed() bool { return g > _errLexErrorsStart }
 type PDF struct {
 	sections []xrefSection
 	revs     []revInfo
+	recbuf   [classicRecLen]byte
 }
 
 // xrefSection describes one cross-reference subsection without materializing
@@ -63,6 +68,22 @@ type xrefSection struct {
 
 	isXrefStream bool
 }
+
+// xrefRecord is a single decoded cross-reference entry.
+type xrefRecord struct {
+	offset int64 // recNormal: absolute object offset. recCompressed: index in stream.
+	stream uint32
+	gen    uint16
+	kind   recordKind
+}
+
+type recordKind uint8
+
+const (
+	recordFree       = 'f'
+	recordCompressed = 'c'
+	recordNormal     = 'n'
+)
 
 // revInfo is one cross-reference chain step recorded during Decode.
 type revInfo struct {
@@ -88,7 +109,7 @@ func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
 	n, err := readAtFull(r, header, 0)
 	if err != nil {
 		return err
-	} else if !bcmp(header, "%PDF-") {
+	} else if !bequal(header, "%PDF-") {
 		return ErrMissingHeader
 	}
 
@@ -198,7 +219,100 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
 	}
+	dictV, err := codec.decodeShallow()
+	if err != nil {
+		return 0, err
+	} else if dictV.Tok != tokDict {
+		return 0, errXrefStreamMissingDict
+	}
+	if n := len(pdf.revs); n > 0 {
+		pdf.revs[n-1].trailerOff = dictV.I // the stream dict is the trailer.
+	}
+	tv := codec.nextValue(piulex.TokStream, errXrefStreamMissingTok)
+	if codec.accumErr != nil {
+		return 0, codec.accumErr
+	}
+	dataStart, err := codec.lex.StreamDataStart()
+	if err != nil {
+		return 0, err
+	}
 	return 0, errors.New("piudf: xref streams unsupported")
+}
+
+func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {
+	rec := p.recbuf[:classicRecLen]
+	for i := range p.sections {
+		s := &p.sections[i]
+		if num < s.firstObj || num >= s.firstObj+s.count {
+			continue
+		}
+		if s.isXrefStream {
+			rowlen := int64(s.w[0]) + int64(s.w[1]) + int64(s.w[2])
+			off := s.fileOff + rowlen*int64(num-s.firstObj)
+			if off < 0 || off+rowlen > int64(len(codec.buf)) {
+				return xrefRecord{}, errXrefStreamBad // TODO fmt.Errorf("%w: xref stream row outside decoded data", ErrCorrupt)
+			}
+			return parseStreamRecord(codec.buf[off:off+rowlen], s.w)
+		}
+		recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
+		_, err := readAtFull(r, rec, recOff)
+		if err != nil {
+			return xrefRecord{}, err // TODO fmt.Errorf("piudf: reading xref record %d/%d at %#x: %w", n, len(rec), recOff, err)
+		}
+		return parseClassicRecord(rec, recOff)
+	}
+	return xrefRecord{}, errors.New("object not found")
+}
+
+// parseStreamRecord decodes one row of a cross-reference stream: up to
+// three big-endian fields of the widths declared by /W. A zero-width type
+// field defaults to type 1 (ISO 32000-1 7.5.8.3); unknown types read as
+// free, which the spec equates with references to the null object.
+func parseStreamRecord(rec []byte, w [3]uint8) (xrefRecord, error) {
+	be := func(b []byte) int64 {
+		var v int64
+		for _, c := range b {
+			v = v<<8 | int64(c)
+		}
+		return v
+	}
+	typ := int64(1)
+	i := int(w[0])
+	if i > 0 {
+		typ = be(rec[:i])
+	}
+	f2 := be(rec[i : i+int(w[1])])
+	f3 := be(rec[i+int(w[1]) : i+int(w[1])+int(w[2])])
+	switch typ {
+	case 1:
+		if f3 < 0 || f3 > math.MaxUint16 {
+			return xrefRecord{}, errBadXrefStreamObjectHeader // TODO fmt.Errorf("%w: xref stream generation %d", ErrCorrupt, f3)
+		}
+		return xrefRecord{kind: recordNormal, offset: f2, gen: uint16(f3)}, nil
+	case 2:
+		if f2 <= 0 || f2 > math.MaxUint32 {
+			return xrefRecord{}, errBadXrefStreamObjectHeader // TODO fmt.Errorf("%w: xref stream object stream number %d", ErrCorrupt, f2)
+		}
+		return xrefRecord{kind: recordCompressed, stream: uint32(f2), offset: f3}, nil
+	}
+	return xrefRecord{kind: recordFree}, nil
+}
+
+// parseClassicRecord decodes a 20-byte "nnnnnnnnnn ggggg n" record.
+func parseClassicRecord(rec []byte, recOff int64) (xrefRecord, error) {
+	off, ok1 := parseInt(rec[0:10])
+	gen, ok2 := parseInt(rec[11:16])
+	kw := rec[17]
+	if ok1 != nil || ok2 != nil {
+		return xrefRecord{}, errors.Join(ok1, ok2)
+	}
+	r := xrefRecord{offset: off, gen: uint16(gen)}
+	if kw == 'f' {
+		r.kind = recordFree
+	} else {
+		r.kind = recordNormal
+	}
+	return r, nil
 }
 
 func readAtFull(r io.ReaderAt, b []byte, off int64) (int, error) {
@@ -211,7 +325,7 @@ func readAtFull(r io.ReaderAt, b []byte, off int64) (int, error) {
 	return n, nil
 }
 
-func bcmp(b []byte, s string) bool {
+func bequal(b []byte, s string) bool {
 	return b2s(b) == s
 }
 
