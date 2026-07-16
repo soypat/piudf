@@ -1,17 +1,16 @@
 package piulex
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"strconv"
+
+	"github.com/soypat/piudf/ppdf/internal"
 )
 
 var ErrMemoryLimit = errors.New("piulex: mem limit exceed")
 
-// Peek length can be incremented in size and code should still work.
-const peeklen = 1
 const defaultLitBuflen = 512
 
 // Lexer tokenizes the structural (non-payload) regions of a PDF file.
@@ -23,15 +22,12 @@ const defaultLitBuflen = 512
 //
 // This Lexer is a faithful adaptation of github.com/soypat/lexer's pato.Lexer implementation.
 type Lexer struct {
-	input     bufio.Reader
-	cursor    readerAtCursor
-	ch        byte          // current byte.
-	chvalid   bool          // ch holds a byte read from input.
-	peek      [peeklen]byte // peek bytes.
-	peekvalid [peeklen]bool
-	idbuf     []byte // stores current literal buildup.
-	err       error
-	pos       int64 // absolute file offset of ch.
+	w       internal.Window
+	pos     int64 // Absolute file offset of ch.
+	ch      byte  // Current byte, a copy: window refills do not invalidate it.
+	chvalid bool  // ch holds a byte read from the file.
+	idbuf   []byte
+	err     error
 
 	// ReuseLiteralBuffer makes NextToken reuse the literal buffer between
 	// calls: returned literals are only valid until the next NextToken.
@@ -43,94 +39,65 @@ type Lexer struct {
 	MaxLiteral int
 }
 
-// readerAtCursor adapts an io.ReaderAt to io.Reader for bufio refills.
-type readerAtCursor struct {
-	r   io.ReaderAt
-	off int64
-}
-
-func (c *readerAtCursor) Read(p []byte) (int, error) {
-	n, err := c.r.ReadAt(p, c.off)
-	c.off += int64(n)
-	return n, err
-}
-
 // Pos returns the absolute byte offset of the current byte.
 func (l *Lexer) Pos() Pos { return Pos(l.pos) }
 
-// Err returns the lexer error, or nil if the error is EOF.
+// Err returns the lexer error, or nil if the input merely ended.
 func (l *Lexer) Err() error {
-	if l.err == io.EOF {
-		return nil
-	}
-	return l.err
-}
-
-// IsDone returns true if the lexer has finished processing (error occurred
-// and no current byte).
-func (l *Lexer) IsDone() bool { return l.err != nil && !l.chvalid }
-
-// Reset initializes the lexer to tokenize r starting at absolute offset off.
-// It preserves ReuseLiteralBuffer, MaxLiteral and internal buffers across
-// resets so a single Lexer can jump around a file without allocating.
-func (l *Lexer) Reset(r io.ReaderAt, off int64) error {
-	if r == nil {
-		return errors.New("piudf: nil reader")
-	} else if off < 0 {
-		return errors.New("piudf: negative offset")
-	}
-	*l = Lexer{
-		ReuseLiteralBuffer: l.ReuseLiteralBuffer,
-		MaxLiteral:         l.MaxLiteral,
-		input:              l.input,
-		idbuf:              l.idbuf,
-		cursor:             readerAtCursor{r: r, off: off},
-	}
-	l.input.Reset(&l.cursor)
-	// Fill up peek buffer and current byte. pos advances by one per
-	// promotion; start it so pos == off once ch holds the byte at off.
-	l.pos = off - peeklen - 1
-	for range peeklen {
-		l.advance()
-	}
-	l.advance()
-	if l.err != nil && l.err != io.EOF {
+	if l.err != nil {
 		return l.err
 	}
-	return nil
+	return l.w.Err()
+}
+
+// IsDone returns true if the lexer has no current byte, because the input
+// ended or a read failed.
+func (l *Lexer) IsDone() bool { return !l.chvalid }
+
+// Reset points the lexer at absolute offset off of r, reading the file
+// through buf. A nil buf keeps the buffer of a previous Reset, or has the
+// lexer allocate a default-sized one on first use; a larger buf spans more of
+// the file per read and bounds nothing else, as literals build in a separate
+// buffer capped by MaxLiteral.
+//
+// Bytes buffered by an earlier Reset over the same r and buf are reused, so a
+// jump landing inside the window costs no read. ReuseLiteralBuffer, MaxLiteral
+// and both buffers survive across resets. See [internal.Window.Reset] for the
+// requirement on r's dynamic type.
+func (l *Lexer) Reset(r io.ReaderAt, off int64, buf []byte) error {
+	if r == nil {
+		return errors.New("piulex: nil reader")
+	} else if off < 0 {
+		return errors.New("piulex: negative offset")
+	}
+	l.w.Reset(r, buf)
+	l.err = nil
+	l.pos = off
+	l.ch, l.chvalid = l.w.ByteAt(off)
+	return l.w.Err()
 }
 
 func (l *Lexer) advance() {
-	l.ch = l.peek[0]
-	l.chvalid = l.peekvalid[0]
 	l.pos++
-	for i := range peeklen - 1 {
-		l.peek[i] = l.peek[i+1]
-		l.peekvalid[i] = l.peekvalid[i+1]
-	}
-	b, err := l.input.ReadByte()
-	if err != nil {
-		if l.err == nil {
-			l.err = err // Set first error encountered.
-		}
-		b, l.peekvalid[peeklen-1] = 0, false
-	} else {
-		l.peekvalid[peeklen-1] = true
-	}
-	l.peek[peeklen-1] = b
+	l.ch, l.chvalid = l.w.ByteAt(l.pos)
+}
+
+// peekIs reports whether the byte after the current one is c.
+func (l *Lexer) peekIs(c byte) bool {
+	b, ok := l.w.ByteAt(l.pos + 1)
+	return ok && b == c
 }
 
 // NextToken returns the next token, its starting byte offset, and its
 // literal value. Returns TokEOF at end of input, TokIllegal on errors; call
 // Err for the failure cause.
 func (l *Lexer) NextToken() (tok Token, start Pos, literal []byte) {
-	if l.cursor.r == nil {
-		l.err = errors.New("piudf: lexer uninitialized")
-		return TokIllegal, 0, nil
-	}
 	l.SkipWhitespace() // Skip early, not after tokenizing: more intuitive lexer behavior.
 	start = l.Pos()
 	if !l.chvalid {
+		if l.err == nil {
+			l.err = l.w.Err()
+		}
 		if l.err == nil || l.err == io.EOF {
 			return TokEOF, start, nil
 		}
@@ -145,7 +112,7 @@ func (l *Lexer) NextToken() (tok Token, start Pos, literal []byte) {
 		literal, ok = l.readLiteralString()
 		tok = TokString
 	case ch == '<':
-		if l.peekvalid[0] && l.peek[0] == '<' {
+		if l.peekIs('<') {
 			l.advance()
 			l.advance()
 			return TokDictOpen, start, nil
@@ -153,7 +120,7 @@ func (l *Lexer) NextToken() (tok Token, start Pos, literal []byte) {
 		literal, ok = l.readHexString()
 		tok = TokHexString
 	case ch == '>':
-		if l.peekvalid[0] && l.peek[0] == '>' {
+		if l.peekIs('>') {
 			l.advance()
 			l.advance()
 			return TokDictClose, start, nil
@@ -195,7 +162,7 @@ func (l *Lexer) StreamDataStart() (Pos, error) {
 	case l.chvalid && l.ch == '\n':
 		return Pos(l.pos + 1), nil
 	case l.chvalid && l.ch == '\r':
-		if l.peekvalid[0] && l.peek[0] == '\n' {
+		if l.peekIs('\n') {
 			return Pos(l.pos + 2), nil
 		}
 		return Pos(l.pos + 1), nil
