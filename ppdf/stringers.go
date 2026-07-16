@@ -16,24 +16,25 @@ func _() {
 	_ = x[ErrCodecMemLimit-6]
 	_ = x[ErrCodecDepthLimit-7]
 	_ = x[ErrInvalidCodecConfig-8]
-	_ = x[_errLexErrorsStart-9]
-	_ = x[errXrefStreamBad-10]
-	_ = x[errXrefStreamMissingDict-11]
-	_ = x[errXrefStreamMissingTok-12]
-	_ = x[ErrIllegalToken-13]
-	_ = x[errUnexpectedToken-14]
-	_ = x[ErrPrevLoop-15]
-	_ = x[errPrevChainTooLong-16]
-	_ = x[errExpectedXref-17]
-	_ = x[errBadSubsectionStart-18]
-	_ = x[errExpectingSubsectionOrTrailer-19]
-	_ = x[errBadXrefStreamObjectHeader-20]
-	_ = x[errUnexpectedEOF-21]
+	_ = x[errTODO-9]
+	_ = x[_errLexErrorsStart-10]
+	_ = x[errXrefStreamBad-11]
+	_ = x[errXrefStreamMissingDict-12]
+	_ = x[errXrefStreamMissingTok-13]
+	_ = x[ErrIllegalToken-14]
+	_ = x[errUnexpectedToken-15]
+	_ = x[ErrPrevLoop-16]
+	_ = x[errPrevChainTooLong-17]
+	_ = x[errExpectedXref-18]
+	_ = x[errBadSubsectionStart-19]
+	_ = x[errExpectingSubsectionOrTrailer-20]
+	_ = x[errBadXrefStreamObjectHeader-21]
+	_ = x[errUnexpectedEOF-22]
 }
 
-const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headererrUnexpectedEOF"
+const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configPDF feature not implemented yetxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headerunexpected end of file"
 
-var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 175, 200, 224, 260, 273, 289, 305, 325, 348, 374, 425, 454, 470}
+var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 206, 206, 231, 255, 291, 304, 320, 336, 356, 379, 405, 456, 485, 507}
 
 func (i genericErr) String() string {
 	idx := int(i) - 1

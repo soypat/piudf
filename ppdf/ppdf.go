@@ -25,6 +25,7 @@ const (
 	ErrCodecMemLimit                 // Codec memory limit hit
 	ErrCodecDepthLimit               // Codec depth limit hit
 	ErrInvalidCodecConfig            // Codec invalid config
+	errTODO                          // PDF feature not implemented yet
 
 	// Lexer errors below.
 	_errLexErrorsStart              //
@@ -39,10 +40,10 @@ const (
 	errBadSubsectionStart           // bad subsection start/entry
 	errExpectingSubsectionOrTrailer // unexpected token looking for subsections or trailer
 	errBadXrefStreamObjectHeader    // bad xref stream object header
-	errUnexpectedEOF
+	errUnexpectedEOF                // unexpected end of file
 )
 
-func (g genericErr) Error() string { return g.Error() }
+func (g genericErr) Error() string { return g.String() }
 
 // IsLexed signals the error was encountered during lexing, so the [piulex.Lexer]
 // has state on where the error was encountered in Pos and Error methods.
@@ -104,6 +105,10 @@ func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
 		return err
 	}
 	buf := codec.buf
+	// Literals are consumed before the next token is lexed, so one reused
+	// buffer serves them all.
+	codec.lex.ReuseLiteralBuffer = true
+	codec.lex.MaxLiteral = len(buf)
 	pdf.Reset()
 	header := buf[:5]
 	n, err := readAtFull(r, header, 0)
@@ -114,8 +119,8 @@ func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
 	}
 
 	// Look for startxref string.
-	tail := buf
 	readlim := min(size, int64(len(buf)))
+	tail := buf[:readlim]
 	n, err = readAtFull(r, tail, size-readlim)
 	if err != nil {
 		return err
@@ -159,7 +164,7 @@ const classicRecLen = 20
 
 func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
 	lx := &codec.lex
-	if err = lx.Reset(r, off); err != nil {
+	if err = codec.lexAt(r, off); err != nil {
 		return 0, err
 	}
 	tok, _, _ := lx.NextToken()
@@ -174,7 +179,14 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 		tok, _, lit := lx.NextToken()
 		switch tok {
 		case piulex.TokTrailer:
-			return 0, nil // TODO get root/info/size data.
+			// The dictionary follows the keyword; record it so callers can
+			// read /Root and /Info without rewalking the chain.
+			trailerOff := int64(lx.Pos())
+			if n := len(pdf.revs); n > 0 {
+				pdf.revs[n-1].trailerOff = trailerOff
+				pdf.revs[n-1].classic = true
+			}
+			return pdf.trailerPrev(r, trailerOff, codec)
 		case piulex.TokInt:
 			first, _, err := consumeInt(lit)
 			if err != nil {
@@ -199,7 +211,7 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 				pdf.sections = append(pdf.sections, sec)
 			}
 			// Jump over the fixed-width record area instead of tokenizing it.
-			if err := lx.Reset(r, recOff+classicRecLen*count); err != nil {
+			if err := codec.lexAt(r, recOff+classicRecLen*count); err != nil {
 				return 0, err
 			}
 		default:
@@ -209,13 +221,27 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 	return 0, ErrCodecMemLimit
 }
 
+// trailerPrev returns the /Prev offset of the trailer dictionary starting at
+// off. A trailer without /Prev is the oldest revision and ends the chain.
+func (pdf *PDF) trailerPrev(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
+	v, err := codec.DictGet(r, Value{Tok: tokDict, I: off}, "Prev")
+	if err != nil {
+		return 0, err
+	}
+	prev, ok := v.Int()
+	if !ok {
+		return 0, nil
+	}
+	return prev, nil
+}
+
 func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
 	if err = codec.lexAt(r, off); err != nil {
 		return 0, err
 	}
-	numTv := codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader)
-	genTv := codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader)
-	objTv := codec.nextValue(piulex.TokObj, errBadXrefStreamObjectHeader)
+	codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader) // Object number.
+	codec.nextValue(piulex.TokInt, errBadXrefStreamObjectHeader) // Generation.
+	codec.nextValue(piulex.TokObj, errBadXrefStreamObjectHeader)
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
 	}
@@ -228,15 +254,19 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	if n := len(pdf.revs); n > 0 {
 		pdf.revs[n-1].trailerOff = dictV.I // the stream dict is the trailer.
 	}
-	tv := codec.nextValue(piulex.TokStream, errXrefStreamMissingTok)
+	codec.nextValue(piulex.TokStream, errXrefStreamMissingTok)
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
 	}
-	dataStart, err := codec.lex.StreamDataStart()
+	_, err = codec.lex.StreamDataStart()
 	if err != nil {
 		return 0, err
 	}
-	return 0, errors.New("piudf: xref streams unsupported")
+	// TODO: decode the /W rows of the stream payload into sections and return
+	// the dict's /Prev. Undecided: who owns the decompressed rows. They are
+	// not random-access on disk like classic records, so something must hold
+	// them; PDF must stay lazy, so not there.
+	return 0, errTODO
 }
 
 func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {
@@ -247,12 +277,19 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, e
 			continue
 		}
 		if s.isXrefStream {
+			// TODO: rows holds the section's decoded cross-reference stream
+			// rows; who owns them is undecided. Not PDF, which stays lazy,
+			// and not the Codec arena, which is scratch reused across calls.
+			var rows []byte
+			if rows == nil {
+				return xrefRecord{}, errTODO
+			}
 			rowlen := int64(s.w[0]) + int64(s.w[1]) + int64(s.w[2])
 			off := s.fileOff + rowlen*int64(num-s.firstObj)
-			if off < 0 || off+rowlen > int64(len(codec.buf)) {
+			if off < 0 || off+rowlen > int64(len(rows)) {
 				return xrefRecord{}, errXrefStreamBad // TODO fmt.Errorf("%w: xref stream row outside decoded data", ErrCorrupt)
 			}
-			return parseStreamRecord(codec.buf[off:off+rowlen], s.w)
+			return parseStreamRecord(rows[off:off+rowlen], s.w)
 		}
 		recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
 		_, err := readAtFull(r, rec, recOff)

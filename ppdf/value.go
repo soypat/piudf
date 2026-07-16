@@ -96,7 +96,7 @@ func (v Value) Float() (f float64, ok bool) {
 	case piulex.TokReal:
 		f = math.Float64frombits(uint64(v.I))
 	case piulex.TokInt:
-		f = math.Float64frombits(uint64(v.I))
+		f = float64(v.I)
 	default:
 		return math.NaN(), false
 	}
