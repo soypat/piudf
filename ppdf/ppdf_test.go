@@ -108,6 +108,41 @@ func TestArrayForEachUnterminated(t *testing.T) {
 	}
 }
 
+// TestDictForEachKeys pins the literal surviving the pushback queue. Every
+// key here follows an integer, so decodeShallow's reference lookahead reads
+// each one before DictForEach does and hands it back through pushback; a
+// queue that drops literals reports these keys as empty while their values
+// stay correct.
+func TestDictForEachKeys(t *testing.T) {
+	const src = `<</Size 5482/Root 4883 0 R/Prev 12/Info 5481 0 R>>`
+	c := newCodec(make([]byte, 2048))
+	var got []string
+	err := c.DictForEach(strings.NewReader(src), Value{Tok: tokDict, I: 0}, func(key []byte, v Value) bool {
+		got = append(got, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("DictForEach: %v", err)
+	}
+	want := []string{"Size", "Root", "Prev", "Info"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d keys, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("key %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+	// DictGet rides on the same scan: a key it cannot see reads as absent.
+	v, err := c.DictGet(strings.NewReader(src), Value{Tok: tokDict, I: 0}, "Root")
+	if err != nil {
+		t.Fatalf("DictGet: %v", err)
+	}
+	if id := v.ObjectID(); id.Num != 4883 || id.Gen != 0 {
+		t.Errorf("/Root: got %v, want object 4883 gen 0", id)
+	}
+}
+
 // TestDecodeXrefStream checks the deferred-payload design end to end: the
 // chain walks and every section is recorded without a byte of the compressed
 // payload being decoded, because /Prev and /W live in the plaintext stream

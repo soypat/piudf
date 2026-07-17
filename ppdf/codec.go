@@ -15,12 +15,23 @@ const (
 )
 
 type Codec struct {
-	npb      int
-	pb       [2]Value
+	npb int
+	pb  [2]Value
+	// pblit preserves the literal of a pushed-back name. The lexer reuses its
+	// literal buffer every token, so a name crossing the pushback queue would
+	// come back empty — which is exactly what a dictionary key does whenever
+	// decodeShallow's reference lookahead reads past an integer value.
+	pblit    [2][maxNameLen]byte
+	pblitLen [2]uint8
 	stmDepth int
 	lex      piulex.Lexer
 
 	buf []byte
+
+	// keybuf holds the current dictionary key while its value is lexed. It
+	// cannot live in buf: that arena is the lexer's window, so a key copied
+	// there overwrites the very bytes the value is read from.
+	keybuf [maxNameLen]byte
 
 	accumErr        error
 	MaxLazySections int
@@ -28,6 +39,11 @@ type Codec struct {
 	auxcounter      int
 	auxkey          string
 }
+
+// maxNameLen is the name length ISO 32000-1 Annex C.2 requires an
+// implementation to support. Longer keys are out of spec, and treating them
+// as such is what keeps a key in fixed storage.
+const maxNameLen = 127
 
 // ArrayForEach calls push with each element of array arrVal in order,
 // stopping early when push returns false. Elements come through
@@ -47,7 +63,7 @@ func (codec *Codec) ArrayForEach(r io.ReaderAt, arrVal Value, push func(Value) b
 	for {
 		// decodeShallow does not know the array's terminator, so the closing
 		// bracket is recognized here and every other token handed back to it.
-		nt, _, err := codec.nextRaw()
+		nt, nlit, err := codec.nextRaw()
 		if err != nil {
 			return err
 		}
@@ -57,7 +73,9 @@ func (codec *Codec) ArrayForEach(r io.ReaderAt, arrVal Value, push func(Value) b
 		case piulex.TokEOF:
 			return errUnexpectedEOF
 		}
-		codec.unread(nt)
+		if err = codec.unread(nt, nlit); err != nil {
+			return err
+		}
 		ev, err := codec.decodeShallow()
 		if err != nil {
 			return err
@@ -105,7 +123,12 @@ func (d *Codec) DictForEach(r io.ReaderAt, dictVal Value, push func(key []byte, 
 		case piulex.TokDictClose:
 			return nil // Dictionary done.
 		case piulex.TokName:
-			key := append(d.buf[:0], lit...)
+			if len(lit) > len(d.keybuf) {
+				return errNameTooLong
+			}
+			// lit points into the lexer's literal buffer and dies at the next
+			// token, which decodeShallow below lexes.
+			key := d.keybuf[:copy(d.keybuf[:], lit)]
 			val, err := d.decodeShallow()
 			if err != nil {
 				return err
@@ -311,7 +334,7 @@ func (d *Codec) nextRawExpect(tok piulex.Token, elseErr error) (v Value, lit []b
 func (d *Codec) nextRaw() (v Value, lit []byte, err error) {
 	if d.npb > 0 {
 		d.npb--
-		return d.pb[d.npb], nil, nil
+		return d.pb[d.npb], d.pblit[d.npb][:d.pblitLen[d.npb]], nil
 	}
 	var pos piulex.Pos
 	v.Tok, pos, lit = d.lex.NextToken()
@@ -346,12 +369,12 @@ func (d *Codec) decodeShallow() (_ Value, _ error) {
 	switch tv.Tok {
 	case piulex.TokInt:
 		// Lookahead for an indirect reference: <int> <int> R.
-		tv2, _, err := d.nextRaw()
+		tv2, lit2, err := d.nextRaw()
 		if err != nil {
 			return Value{}, err
 		}
 		if tv2.Tok == piulex.TokInt {
-			tv3, _, err := d.nextRaw()
+			tv3, lit3, err := d.nextRaw()
 			if err != nil {
 				return Value{}, err
 			}
@@ -359,9 +382,13 @@ func (d *Codec) decodeShallow() (_ Value, _ error) {
 				tv2.I >= 0 && tv2.I <= math.MaxUint16 {
 				return Value{N: uint32(tv.I), I: tv2.I, Tok: piulex.TokR}, nil
 			}
-			d.unread(tv3)
+			if err = d.unread(tv3, lit3); err != nil {
+				return Value{}, err
+			}
 		}
-		d.unread(tv2)
+		if err = d.unread(tv2, lit2); err != nil {
+			return Value{}, err
+		}
 		return tv, nil
 	case piulex.TokReal, piulex.TokName, piulex.TokString, piulex.TokHexString, piulex.TokTrue, piulex.TokFalse, piulex.TokNull:
 		return tv, nil
@@ -378,10 +405,21 @@ func (d *Codec) decodeShallow() (_ Value, _ error) {
 	return Value{}, errUnexpectedEOF
 }
 
-// unread pushes tv back; up to len(d.pb) tokens may be pending.
-func (d *Codec) unread(tv Value) {
+// unread pushes tv back; up to len(d.pb) tokens may be pending. lit is kept
+// for names only: numbers arrive already parsed into Value.I, and every other
+// literal-bearing token is a span the Value locates on its own.
+func (d *Codec) unread(tv Value, lit []byte) error {
+	n := 0
+	if tv.Tok == piulex.TokName {
+		if len(lit) > maxNameLen {
+			return errNameTooLong
+		}
+		n = copy(d.pblit[d.npb][:], lit)
+	}
+	d.pblitLen[d.npb] = uint8(n)
 	d.pb[d.npb] = tv
 	d.npb++
+	return nil
 }
 
 // skipComposite scans past the body of a composite whose opening token was

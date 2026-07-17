@@ -27,6 +27,7 @@ const (
 	ErrInvalidCodecConfig            // Codec invalid config
 	errTODO                          // PDF feature not implemented yet
 	errValueMismatch                 // value kind/type mismatch
+	errNameTooLong                   // name longer than implementation limit
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error
@@ -51,7 +52,7 @@ func (g genericErr) IsLexed() bool { return g > _errLexErrorsStart }
 
 type PDF struct {
 	sections []xrefSection
-	revs     []revInfo
+	revs     []Revision
 	recbuf   [classicRecLen]byte
 }
 
@@ -108,12 +109,58 @@ const (
 	recordNormal     = 'n'
 )
 
-// revInfo is one cross-reference chain step recorded during Decode.
-type revInfo struct {
-	xrefOff      int64
-	trailerOff   int64
-	firstSection int
-	classic      bool
+// Revision is one step of the cross-reference chain as recorded by Decode.
+// Revisions are ordered newest first: index 0 is the revision startxref
+// points at, and each following one is its /Prev.
+type Revision struct {
+	trailerOff int64
+	// XrefOffset is the file offset of the 'xref' keyword when Classic, or of
+	// the cross-reference stream's object header otherwise.
+	XrefOffset int64
+	// FirstSection indexes this revision's first cross-reference subsection.
+	FirstSection int
+	// Classic reports a 7.5.4 table rather than a 1.5 cross-reference stream.
+	Classic bool
+}
+
+// Trailer is the revision's trailer dictionary. A cross-reference stream
+// has no separate trailer: its own dictionary carries the trailer keys.
+func (rev Revision) Trailer() Value {
+	// Length is unknown and unneeded: accessors lex a dictionary from its
+	// opening bracket and stop at the matching close.
+	return Value{Tok: tokDict, I: rev.trailerOff}
+}
+
+// NumRevisions returns how many cross-reference chain steps Decode walked.
+func (pdf *PDF) NumRevisions() int { return len(pdf.revs) }
+
+// Revision returns chain step i, newest first. It panics if i is out of range.
+func (pdf *PDF) Revision(i int) Revision {
+	return pdf.revs[i]
+}
+
+// Trailer returns the newest revision's trailer dictionary, the entry point
+// to the document: /Root, /Info, /Size and /Encrypt live there.
+func (pdf *PDF) Trailer() Value {
+	if len(pdf.revs) == 0 {
+		return Value{Tok: piulex.TokNull}
+	}
+	return pdf.Revision(0).Trailer()
+}
+
+// NumXrefSections returns the number of cross-reference subsections recorded
+// across every revision.
+func (pdf *PDF) NumXrefSections() int { return len(pdf.sections) }
+
+// SizeOnRAM returns the bytes pdf holds: the struct plus the backing arrays of
+// its slices, counted at capacity since that is what is actually retained.
+// The document's own bytes are not among them — a PDF is coordinates, so this
+// grows with the number of cross-reference subsections and revisions and not
+// with the file's size. It excludes the Codec, whose arena is caller-owned.
+func (pdf *PDF) SizeOnRAM() int {
+	return int(unsafe.Sizeof(*pdf)) +
+		cap(pdf.sections)*int(unsafe.Sizeof(xrefSection{})) +
+		cap(pdf.revs)*int(unsafe.Sizeof(Revision{}))
 }
 
 func (pdf *PDF) Reset() {
@@ -166,7 +213,7 @@ func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
 		if off < 0 || off >= size {
 			return ErrOOBXref
 		}
-		pdf.revs = append(pdf.revs, revInfo{xrefOff: off, firstSection: len(pdf.sections)})
+		pdf.revs = append(pdf.revs, Revision{XrefOffset: off, FirstSection: len(pdf.sections)})
 		prev, err := pdf.decodeXrefTable(r, off, codec)
 		if err != nil {
 			return err
@@ -206,7 +253,7 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 			trailerOff := int64(lx.Pos())
 			if n := len(pdf.revs); n > 0 {
 				pdf.revs[n-1].trailerOff = trailerOff
-				pdf.revs[n-1].classic = true
+				pdf.revs[n-1].Classic = true
 			}
 			return codec.dictPrev(r, Value{Tok: tokDict, I: trailerOff})
 		case piulex.TokInt:
