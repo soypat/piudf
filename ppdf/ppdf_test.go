@@ -108,6 +108,43 @@ func TestArrayForEachUnterminated(t *testing.T) {
 	}
 }
 
+// TestDecodeXrefStream checks the deferred-payload design end to end: the
+// chain walks and every section is recorded without a byte of the compressed
+// payload being decoded, because /Prev and /W live in the plaintext stream
+// dictionary.
+func TestDecodeXrefStream(t *testing.T) {
+	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	var pdf PDF
+	if err := pdf.Decode(c, size, newCodec(make([]byte, 4096))); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(pdf.sections) == 0 {
+		t.Fatal("no xref sections decoded")
+	}
+	t.Logf("%d reads, %d bytes, %d sections, %d revisions",
+		c.reads, c.bytes, len(pdf.sections), len(pdf.revs))
+	var rows uint32
+	for i, s := range pdf.sections {
+		if !s.isXrefStream {
+			t.Errorf("section %d is classic, want stream", i)
+			continue
+		}
+		if s.length <= 0 || s.fileOff <= 0 || s.fileOff+s.length > size {
+			t.Errorf("section %d payload [%d,+%d) outside a %d byte file", i, s.fileOff, s.length, size)
+		}
+		if s.w[1] == 0 {
+			t.Errorf("section %d has zero /W offset width", i)
+		}
+		if !s.codec.flate {
+			t.Errorf("section %d is not FlateDecode", i)
+		}
+		rows += s.count
+	}
+	if rows == 0 {
+		t.Error("sections cover no rows")
+	}
+}
+
 // TestDecodeClassicReadCount pins the point of the offset-addressed window:
 // sto.pdf is incrementally updated, so its xref chain walks many revisions
 // whose trailers sit within a few hundred bytes of each other. Before the

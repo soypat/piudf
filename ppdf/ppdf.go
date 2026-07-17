@@ -55,19 +55,41 @@ type PDF struct {
 	recbuf   [classicRecLen]byte
 }
 
-// xrefSection describes one cross-reference subsection without materializing
-// its entries. Classic on-disk tables are already random-access arrays of
-// fixed-width records, so lookups read single records via ReadAt; the
-// decoded rows of a cross-reference stream live in PDF.xbuf and are read
-// from memory. Memory cost is O(number of subsections) plus, for streams,
-// the decoded rows.
+// xrefSection describes one cross-reference subsection as coordinates only;
+// no entry is ever materialized here. Classic on-disk tables are already
+// random-access arrays of fixed-width records, so lookups read a single
+// record via ReadAt. A cross-reference stream instead records where its
+// encoded payload lives and how it is encoded, leaving the decode to
+// whoever resolves an object. Memory cost is O(number of subsections).
 type xrefSection struct {
 	firstObj uint32
 	count    uint32
-	fileOff  int64    // sectClassic: file offset of the first record. sectStream: offset into PDF.xbuf.
-	w        [3]uint8 // Field widths; classic is {10, 5, 1}, streams use /W.
+	// fileOff is the file offset of the subsection's first record when
+	// classic, or of the encoded stream payload when isXrefStream. Payload
+	// bytes are addressed the same way as everything else in this package:
+	// by file coordinate.
+	fileOff int64
+	length  int64 // isXrefStream: encoded payload length, from /Length.
+	// rowFirst is the subsection's first row within the *decoded* payload.
+	// Subsections of one stream share a payload and index it cumulatively,
+	// so this is a row number and not any kind of offset.
+	rowFirst uint32
+	w        [3]uint8    // Field widths; classic is {10, 5, 1}, streams use /W.
+	codec    streamCodec // isXrefStream: how to decode the payload.
 
 	isXrefStream bool
+}
+
+// streamCodec is the decoded /Filter and /DecodeParms of an internal (xref
+// or object) stream. Only FlateDecode, optionally behind a predictor, is
+// valid on one. The zero value decodes nothing; see readCodec for the
+// defaults the format mandates.
+type streamCodec struct {
+	columns   uint16
+	predictor uint8
+	colors    uint8
+	bpc       uint8
+	flate     bool
 }
 
 // xrefRecord is a single decoded cross-reference entry.
@@ -186,7 +208,7 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 				pdf.revs[n-1].trailerOff = trailerOff
 				pdf.revs[n-1].classic = true
 			}
-			return pdf.trailerPrev(r, trailerOff, codec)
+			return codec.dictPrev(r, Value{Tok: tokDict, I: trailerOff})
 		case piulex.TokInt:
 			first, _, err := consumeInt(lit)
 			if err != nil {
@@ -221,20 +243,6 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 	return 0, ErrCodecMemLimit
 }
 
-// trailerPrev returns the /Prev offset of the trailer dictionary starting at
-// off. A trailer without /Prev is the oldest revision and ends the chain.
-func (pdf *PDF) trailerPrev(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
-	v, err := codec.DictGet(r, Value{Tok: tokDict, I: off}, "Prev")
-	if err != nil {
-		return 0, err
-	}
-	prev, ok := v.Int()
-	if !ok {
-		return 0, nil
-	}
-	return prev, nil
-}
-
 func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev int64, err error) {
 	if err = codec.lexAt(r, off); err != nil {
 		return 0, err
@@ -258,43 +266,126 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
 	}
-	_, err = codec.lex.StreamDataStart()
+	// The payload span must be taken before any DictGet below: those re-lex
+	// the dictionary and move the lexer off the stream keyword.
+	dataStart, err := codec.lex.StreamDataStart()
 	if err != nil {
 		return 0, err
 	}
-	// Scalar entries; ISO 32000-1 7.5.8.2 requires them to be direct.
+	// Scalar entries; ISO 32000-1 7.5.8.2 requires them to be direct. That is
+	// not a convenience: an xref stream whose /Length were an indirect
+	// reference could not be read without the xref it defines.
 	size := codec.dictGetAccum(r, dictV, "Size", piulex.TokInt)
 	length := codec.dictGetAccum(r, dictV, "Length", piulex.TokInt)
 	wV := codec.dictGetAccum(r, dictV, "W", tokArray)
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
-	} else if size.I <= 0 || length.I < 0 {
+	} else if size.I <= 0 || size.I > math.MaxUint32 || length.I < 0 {
 		return 0, errXrefStreamBad
 	}
+	w, err := codec.readWidths(r, wV)
+	if err != nil {
+		return 0, err
+	}
+	sc, err := codec.readCodec(r, dictV)
+	if err != nil {
+		return 0, err
+	}
+	// The payload stays on disk. Every subsection of this stream shares these
+	// coordinates; /Index below varies only the object and row ranges.
+	proto := xrefSection{
+		fileOff:      int64(dataStart),
+		length:       length.I,
+		w:            w,
+		codec:        sc,
+		isXrefStream: true,
+	}
+	if err = pdf.appendStreamSections(r, codec, dictV, proto, uint32(size.I)); err != nil {
+		return 0, err
+	}
+	return codec.dictPrev(r, dictV)
+}
+
+// readWidths reads the three /W field widths, which are the row layout of a
+// cross-reference stream's records.
+func (codec *Codec) readWidths(r io.ReaderAt, wV Value) (w [3]uint8, err error) {
 	codec.auxcounter = 0
-	var w [3]uint8
 	err = codec.ArrayForEach(r, wV, func(v Value) bool {
 		n, ok := v.Int()
-		codec.auxcounter++
 		ok = ok && n >= 0 && n <= 8 && codec.auxcounter < len(w)
 		if !ok {
 			codec.accumErr = errXrefStreamBad
 			return false
 		}
 		w[codec.auxcounter] = uint8(n)
+		codec.auxcounter++
 		return true
 	})
 	if err != nil {
-		return 0, err
+		return w, err
 	} else if codec.accumErr != nil {
-		return 0, codec.accumErr
+		return w, codec.accumErr
+	} else if codec.auxcounter != len(w) || w[1] == 0 {
+		// /W is exactly three widths, and field 2 always carries the offset:
+		// a zero there leaves every record pointing at byte 0.
+		return w, errXrefStreamBad
 	}
+	return w, nil
+}
 
-	// TODO: decode the /W rows of the stream payload into sections and return
-	// the dict's /Prev. Undecided: who owns the decompressed rows. They are
-	// not random-access on disk like classic records, so something must hold
-	// them; PDF must stay lazy, so not there.
-	return 0, errTODO
+// appendStreamSections records one section per /Index pair, defaulting to the
+// single range [0, /Size). proto carries the payload coordinates shared by
+// every subsection of the stream; only the object and row ranges differ.
+func (pdf *PDF) appendStreamSections(r io.ReaderAt, codec *Codec, dictV Value, proto xrefSection, size uint32) error {
+	idxV, err := codec.DictGet(r, dictV, "Index")
+	if err != nil {
+		return err
+	}
+	if idxV.IsNull() {
+		proto.firstObj, proto.count, proto.rowFirst = 0, size, 0
+		return pdf.appendSection(codec, proto)
+	} else if !idxV.IsArray() {
+		return errXrefStreamBad
+	}
+	var first, rows uint32
+	codec.auxcounter = 0
+	err = codec.ArrayForEach(r, idxV, func(v Value) bool {
+		n, ok := v.Int()
+		if !ok || n < 0 || n > math.MaxUint32 {
+			codec.accumErr = errXrefStreamBad
+			return false
+		}
+		even := codec.auxcounter%2 == 0
+		codec.auxcounter++
+		if even {
+			first = uint32(n)
+			return true
+		}
+		count := uint32(n)
+		if count == 0 {
+			return true // Empty subsection: no rows, nothing to record.
+		}
+		proto.firstObj, proto.count, proto.rowFirst = first, count, rows
+		rows += count
+		codec.accumErr = pdf.appendSection(codec, proto)
+		return codec.accumErr == nil
+	})
+	if err != nil {
+		return err
+	} else if codec.accumErr != nil {
+		return codec.accumErr
+	} else if codec.auxcounter%2 != 0 {
+		return errXrefStreamBad // /Index is first/count pairs.
+	}
+	return nil
+}
+
+func (pdf *PDF) appendSection(codec *Codec, s xrefSection) error {
+	if len(pdf.sections) >= codec.MaxLazySections {
+		return ErrCodecMemLimit
+	}
+	pdf.sections = append(pdf.sections, s)
+	return nil
 }
 
 func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {
@@ -305,15 +396,19 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, e
 			continue
 		}
 		if s.isXrefStream {
-			// TODO: rows holds the section's decoded cross-reference stream
-			// rows; who owns them is undecided. Not PDF, which stays lazy,
-			// and not the Codec arena, which is scratch reused across calls.
+			rowlen := int64(s.w[0]) + int64(s.w[1]) + int64(s.w[2])
+			// A row index within the decoded payload, not a byte offset into
+			// the file: subsections of one stream share a payload and index
+			// it cumulatively from rowFirst.
+			off := rowlen * (int64(s.rowFirst) + int64(num-s.firstObj))
+			// TODO: rows is the payload at [s.fileOff, +s.length) decoded per
+			// s.codec. Reaching this row means decoding every row before it —
+			// flate has no random access and PNG predictors chain row to row —
+			// so the Codec has to inflate and cache it, one stream at a time.
 			var rows []byte
-			if rows == nil {
+			if len(rows) == 0 {
 				return xrefRecord{}, errTODO
 			}
-			rowlen := int64(s.w[0]) + int64(s.w[1]) + int64(s.w[2])
-			off := s.fileOff + rowlen*int64(num-s.firstObj)
 			if off < 0 || off+rowlen > int64(len(rows)) {
 				return xrefRecord{}, errXrefStreamBad // TODO fmt.Errorf("%w: xref stream row outside decoded data", ErrCorrupt)
 			}

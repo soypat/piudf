@@ -120,6 +120,119 @@ func (d *Codec) DictForEach(r io.ReaderAt, dictVal Value, push func(key []byte, 
 	}
 }
 
+// dictPrev returns the /Prev offset of trailer dictionary dictV. A trailer
+// without /Prev is the oldest revision and ends the cross-reference chain.
+func (d *Codec) dictPrev(r io.ReaderAt, dictV Value) (prev int64, err error) {
+	v, err := d.DictGet(r, dictV, "Prev")
+	if err != nil {
+		return 0, err
+	}
+	prev, ok := v.Int()
+	if !ok {
+		return 0, nil
+	}
+	return prev, nil
+}
+
+// NameIs reports whether name span v is the PDF name s.
+func (d *Codec) NameIs(r io.ReaderAt, v Value, s string) (bool, error) {
+	if v.Tok != piulex.TokName {
+		return false, errValueMismatch
+	} else if err := d.lexValueSpan(r, v); err != nil {
+		return false, err
+	}
+	tok, _, lit := d.lex.NextToken()
+	if tok != piulex.TokName {
+		return false, errUnexpectedToken
+	}
+	return bequal(lit, s), nil
+}
+
+// arrayFirst returns the sole element of array arrV, or null when it is
+// empty. Internal streams take a single filter, so a longer array is a filter
+// chain and unsupported rather than silently truncated.
+func (d *Codec) arrayFirst(r io.ReaderAt, arrV Value) (v Value, err error) {
+	v = Value{Tok: piulex.TokNull}
+	d.auxcounter = 0
+	err = d.ArrayForEach(r, arrV, func(el Value) bool {
+		if d.auxcounter == 0 {
+			v = el
+		}
+		d.auxcounter++
+		return true
+	})
+	if err != nil {
+		return v, err
+	} else if d.auxcounter > 1 {
+		return v, errTODO // TODO: filter chains on internal streams.
+	}
+	return v, nil
+}
+
+// readCodec extracts the /Filter and /DecodeParms of internal stream dictV.
+// Only a lone FlateDecode, optionally behind a predictor, is valid on one.
+func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error) {
+	// Defaults mandated by ISO 32000-1 Table 10; predictor 1 means none.
+	sc = streamCodec{predictor: 1, columns: 1, colors: 1, bpc: 8}
+	fv, err := d.DictGet(r, dictV, "Filter")
+	if err != nil {
+		return sc, err
+	}
+	if fv.IsArray() {
+		if fv, err = d.arrayFirst(r, fv); err != nil {
+			return sc, err
+		}
+	}
+	switch fv.Tok {
+	case piulex.TokNull:
+		return sc, nil // Unfiltered: no /DecodeParms to read.
+	case piulex.TokName:
+		is, err := d.NameIs(r, fv, "FlateDecode")
+		if err != nil {
+			return sc, err
+		} else if !is {
+			return sc, errTODO // TODO: filters other than FlateDecode.
+		}
+		sc.flate = true
+	default:
+		return sc, errXrefStreamBad
+	}
+	pv, err := d.DictGet(r, dictV, "DecodeParms")
+	if err != nil {
+		return sc, err
+	}
+	if pv.IsArray() {
+		if pv, err = d.arrayFirst(r, pv); err != nil {
+			return sc, err
+		}
+	}
+	if !pv.IsDict() {
+		return sc, nil // No parameters: defaults stand.
+	}
+	// Read through an array rather than pointers into sc, which would force
+	// the returned struct to escape on every call.
+	keys := [4]string{"Predictor", "Columns", "Colors", "BitsPerComponent"}
+	lims := [4]int64{math.MaxUint8, math.MaxUint16, math.MaxUint8, math.MaxUint8}
+	vals := [4]int64{int64(sc.predictor), int64(sc.columns), int64(sc.colors), int64(sc.bpc)}
+	for i, key := range keys {
+		v, err := d.DictGet(r, pv, key)
+		if err != nil {
+			return sc, err
+		}
+		if v.IsNull() {
+			continue // Absent: keep the default.
+		}
+		n, ok := v.Int()
+		if !ok || n < 1 || n > lims[i] {
+			return sc, errXrefStreamBad
+		}
+		vals[i] = n
+	}
+	sc.predictor, sc.columns = uint8(vals[0]), uint16(vals[1])
+	sc.colors, sc.bpc = uint8(vals[2]), uint8(vals[3])
+	return sc, nil
+}
+
 func (d *Codec) dictGetAccum(r io.ReaderAt, dictVal Value, key string, want piulex.Token) Value {
 	if d.accumErr != nil {
 		return Value{}
