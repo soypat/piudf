@@ -53,6 +53,17 @@ func (w *Window) Reset(r io.ReaderAt, buf []byte) {
 
 func (w *Window) Err() error { return w.err }
 
+// Drop discards the resident bytes and any recorded end, so the next ByteAt
+// reads. It is for a reader whose bytes at a given offset changed under the
+// window — a cursor over one decompressed stream pointed at another — which
+// the window cannot notice on its own: it keys what it holds by reader
+// identity, and that identity did not change.
+func (w *Window) Drop() {
+	w.n = 0
+	w.end = math.MaxInt64
+	w.err = nil
+}
+
 // ByteAt returns the file byte at off, refilling only when off falls outside
 // the resident window.
 func (w *Window) ByteAt(off int64) (byte, bool) {

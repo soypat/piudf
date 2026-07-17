@@ -33,6 +33,13 @@ type Codec struct {
 	// there overwrites the very bytes the value is read from.
 	keybuf [maxNameLen]byte
 
+	// rows decodes cross-reference stream records and stm decodes the object
+	// stream currently being read. Both are scratch, not index: each holds
+	// where it stopped rather than what it decoded, so the Codec pays for two
+	// cursors and the PDF still pays nothing per object.
+	rows xrefRows
+	stm  objStm
+
 	accumErr        error
 	MaxLazySections int
 	MaxDepth        int
@@ -49,11 +56,11 @@ const maxNameLen = 127
 // stopping early when push returns false. Elements come through
 // decodeShallow, so "1 0 R" arrives as one reference Value and a nested
 // array or dictionary as one span Value; nothing is materialized.
-func (codec *Codec) ArrayForEach(r io.ReaderAt, arrVal Value, push func(Value) bool) error {
+func (codec *Codec) ArrayForEach(pdf *PDF, r io.ReaderAt, arrVal Value, push func(Value) bool) error {
 	v := arrVal
 	if !v.IsArray() {
 		return errValueMismatch
-	} else if err := codec.lexValueSpan(r, v); err != nil {
+	} else if err := codec.lexValueSpan(pdf, r, v); err != nil {
 		return err
 	}
 	tok, _, _ := codec.lex.NextToken()
@@ -86,10 +93,10 @@ func (codec *Codec) ArrayForEach(r io.ReaderAt, arrVal Value, push func(Value) b
 	}
 }
 
-func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (ret Value, err error) {
+func (d *Codec) DictGet(pdf *PDF, r io.ReaderAt, dictVal Value, key string) (ret Value, err error) {
 	ret = Value{Tok: piulex.TokNull}
 	d.auxkey = key
-	err = d.DictForEach(r, dictVal, func(bkey []byte, v Value) bool {
+	err = d.DictForEach(pdf, r, dictVal, func(bkey []byte, v Value) bool {
 		if bequal(bkey, d.auxkey) {
 			ret = v
 			return false
@@ -99,12 +106,12 @@ func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (ret Value, er
 	return ret, err
 }
 
-func (d *Codec) DictForEach(r io.ReaderAt, dictVal Value, push func(key []byte, v Value) bool) error {
+func (d *Codec) DictForEach(pdf *PDF, r io.ReaderAt, dictVal Value, push func(key []byte, v Value) bool) error {
 	v := dictVal
 	if v.Tok != tokDict && v.Tok != tokStream {
 		return errUnexpectedToken
 	}
-	if err := d.lexValueSpan(r, v); err != nil {
+	if err := d.lexValueSpan(pdf, r, v); err != nil {
 		return err
 	}
 	tok, _, _ := d.lex.NextToken()
@@ -145,8 +152,8 @@ func (d *Codec) DictForEach(r io.ReaderAt, dictVal Value, push func(key []byte, 
 
 // dictPrev returns the /Prev offset of trailer dictionary dictV. A trailer
 // without /Prev is the oldest revision and ends the cross-reference chain.
-func (d *Codec) dictPrev(r io.ReaderAt, dictV Value) (prev int64, err error) {
-	v, err := d.DictGet(r, dictV, "Prev")
+func (d *Codec) dictPrev(pdf *PDF, r io.ReaderAt, dictV Value) (prev int64, err error) {
+	v, err := d.DictGet(pdf, r, dictV, "Prev")
 	if err != nil {
 		return 0, err
 	}
@@ -158,10 +165,10 @@ func (d *Codec) dictPrev(r io.ReaderAt, dictV Value) (prev int64, err error) {
 }
 
 // NameIs reports whether name span v is the PDF name s.
-func (d *Codec) NameIs(r io.ReaderAt, v Value, s string) (bool, error) {
+func (d *Codec) NameIs(pdf *PDF, r io.ReaderAt, v Value, s string) (bool, error) {
 	if v.Tok != piulex.TokName {
 		return false, errValueMismatch
-	} else if err := d.lexValueSpan(r, v); err != nil {
+	} else if err := d.lexValueSpan(pdf, r, v); err != nil {
 		return false, err
 	}
 	tok, _, lit := d.lex.NextToken()
@@ -174,10 +181,10 @@ func (d *Codec) NameIs(r io.ReaderAt, v Value, s string) (bool, error) {
 // arrayFirst returns the sole element of array arrV, or null when it is
 // empty. Internal streams take a single filter, so a longer array is a filter
 // chain and unsupported rather than silently truncated.
-func (d *Codec) arrayFirst(r io.ReaderAt, arrV Value) (v Value, err error) {
+func (d *Codec) arrayFirst(pdf *PDF, r io.ReaderAt, arrV Value) (v Value, err error) {
 	v = Value{Tok: piulex.TokNull}
 	d.auxcounter = 0
-	err = d.ArrayForEach(r, arrV, func(el Value) bool {
+	err = d.ArrayForEach(pdf, r, arrV, func(el Value) bool {
 		if d.auxcounter == 0 {
 			v = el
 		}
@@ -194,15 +201,15 @@ func (d *Codec) arrayFirst(r io.ReaderAt, arrV Value) (v Value, err error) {
 
 // readCodec extracts the /Filter and /DecodeParms of internal stream dictV.
 // Only a lone FlateDecode, optionally behind a predictor, is valid on one.
-func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error) {
+func (d *Codec) readCodec(pdf *PDF, r io.ReaderAt, dictV Value) (sc streamCodec, err error) {
 	// Defaults mandated by ISO 32000-1 Table 10; predictor 1 means none.
 	sc = streamCodec{predictor: 1, columns: 1, colors: 1, bpc: 8}
-	fv, err := d.DictGet(r, dictV, "Filter")
+	fv, err := d.DictGet(pdf, r, dictV, "Filter")
 	if err != nil {
 		return sc, err
 	}
 	if fv.IsArray() {
-		if fv, err = d.arrayFirst(r, fv); err != nil {
+		if fv, err = d.arrayFirst(pdf, r, fv); err != nil {
 			return sc, err
 		}
 	}
@@ -210,7 +217,7 @@ func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error
 	case piulex.TokNull:
 		return sc, nil // Unfiltered: no /DecodeParms to read.
 	case piulex.TokName:
-		is, err := d.NameIs(r, fv, "FlateDecode")
+		is, err := d.NameIs(pdf, r, fv, "FlateDecode")
 		if err != nil {
 			return sc, err
 		} else if !is {
@@ -220,12 +227,12 @@ func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error
 	default:
 		return sc, errXrefStreamBad
 	}
-	pv, err := d.DictGet(r, dictV, "DecodeParms")
+	pv, err := d.DictGet(pdf, r, dictV, "DecodeParms")
 	if err != nil {
 		return sc, err
 	}
 	if pv.IsArray() {
-		if pv, err = d.arrayFirst(r, pv); err != nil {
+		if pv, err = d.arrayFirst(pdf, r, pv); err != nil {
 			return sc, err
 		}
 	}
@@ -238,7 +245,7 @@ func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error
 	lims := [4]int64{math.MaxUint8, math.MaxUint16, math.MaxUint8, math.MaxUint8}
 	vals := [4]int64{int64(sc.predictor), int64(sc.columns), int64(sc.colors), int64(sc.bpc)}
 	for i, key := range keys {
-		v, err := d.DictGet(r, pv, key)
+		v, err := d.DictGet(pdf, r, pv, key)
 		if err != nil {
 			return sc, err
 		}
@@ -256,11 +263,11 @@ func (d *Codec) readCodec(r io.ReaderAt, dictV Value) (sc streamCodec, err error
 	return sc, nil
 }
 
-func (d *Codec) dictGetAccum(r io.ReaderAt, dictVal Value, key string, want piulex.Token) Value {
+func (d *Codec) dictGetAccum(pdf *PDF, r io.ReaderAt, dictVal Value, key string, want piulex.Token) Value {
 	if d.accumErr != nil {
 		return Value{}
 	}
-	v, err := d.DictGet(r, dictVal, key)
+	v, err := d.DictGet(pdf, r, dictVal, key)
 	if err != nil {
 		d.accumErr = err
 	} else if v.Tok != want {
@@ -272,11 +279,18 @@ func (d *Codec) dictGetAccum(r io.ReaderAt, dictVal Value, key string, want piul
 // lexValueSpan positions the lexer at span v's first byte: in the file via
 // r, or — for Values tagged with an object stream (see Value.Stm) — inside
 // that stream's decompressed data.
-func (d *Codec) lexValueSpan(r io.ReaderAt, v Value) error {
+//
+// pdf is what locates that stream, and is needed only for a tagged v: a span
+// in file space is already a file coordinate and needs no index to reach, so
+// callers lexing raw source may pass nil.
+func (d *Codec) lexValueSpan(pdf *PDF, r io.ReaderAt, v Value) error {
 	if !v.isSpan() || v.Stm == 0 {
 		return d.lexAt(r, v.I)
 	}
-	return errTODO // TODO: load object stream v.Stm and lex within its decompressed data.
+	if err := pdf.loadObjStm(r, v.Stm, d); err != nil {
+		return err
+	}
+	return d.lexAt(&d.stm.data, v.I)
 }
 
 func (c *Codec) lexAt(r io.ReaderAt, off int64) error {

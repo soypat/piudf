@@ -53,7 +53,7 @@ func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
 	if err != nil || res.IsNull() {
 		return nil, err
 	}
-	fontsD, err := c.codec.DictGet(c.r, res, "Font")
+	fontsD, err := c.codec.DictGet(c.pdf, c.r, res, "Font")
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +67,7 @@ func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
 		id   ppdf.ObjectID
 	}
 	var refs []entry
-	err = c.codec.DictForEach(c.r, fontsD, func(k []byte, v ppdf.Value) bool {
+	err = c.codec.DictForEach(c.pdf, c.r, fontsD, func(k []byte, v ppdf.Value) bool {
 		if v.Tok == piulex.TokR {
 			refs = append(refs, entry{string(k), v.ObjectID()})
 		}
@@ -91,14 +91,14 @@ func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
 // lets a node hand /Resources and /MediaBox down to its kids.
 func (c *ctx) inherited(dict ppdf.Value, key string) (ppdf.Value, error) {
 	for depth := 0; depth <= maxPageDepth; depth++ {
-		v, err := c.codec.DictGet(c.r, dict, key)
+		v, err := c.codec.DictGet(c.pdf, c.r, dict, key)
 		if err != nil {
 			return v, err
 		}
 		if !v.IsNull() {
 			return c.pdf.Deref(c.r, v, c.codec)
 		}
-		parent, err := c.codec.DictGet(c.r, dict, "Parent")
+		parent, err := c.codec.DictGet(c.pdf, c.r, dict, "Parent")
 		if err != nil || parent.IsNull() {
 			return ppdf.Value{Tok: piulex.TokNull}, err
 		}
@@ -117,7 +117,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 	if err != nil {
 		return nil, err
 	}
-	tu, err := c.codec.DictGet(c.r, fd, "ToUnicode")
+	tu, err := c.codec.DictGet(c.pdf, c.r, fd, "ToUnicode")
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 		return parseCMap(cmap)
 	}
 	f := &font{width: 1, text: map[uint32]string{}}
-	enc, err := c.codec.DictGet(c.r, fd, "Encoding")
+	enc, err := c.codec.DictGet(c.pdf, c.r, fd, "Encoding")
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 		// for the Latin ones, which is as far as this goes.
 		return f, nil
 	}
-	diff, err := c.codec.DictGet(c.r, enc, "Differences")
+	diff, err := c.codec.DictGet(c.pdf, c.r, enc, "Differences")
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 	var code uint32
 	var names []string // Collected first; reading a name span re-lexes.
 	var codes []uint32
-	err = c.codec.ArrayForEach(c.r, diff, func(v ppdf.Value) bool {
+	err = c.codec.ArrayForEach(c.pdf, c.r, diff, func(v ppdf.Value) bool {
 		if n, ok := v.Int(); ok {
 			code = uint32(n)
 			return true

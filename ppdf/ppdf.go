@@ -32,6 +32,8 @@ const (
 	errObjectIDMismatch              // object header does not match its xref entry
 	errNotAStream                    // value is not a stream object
 	errStreamBadLength               // stream /Length missing or out of bounds
+	errObjStmNested                  // object stream within an object stream
+	errObjStmBad                     // object stream /N, /First or offset out of bounds
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error
@@ -399,7 +401,7 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 				pdf.revs[n-1].trailerOff = trailerOff
 				pdf.revs[n-1].Classic = true
 			}
-			return codec.dictPrev(r, Value{Tok: tokDict, I: trailerOff})
+			return codec.dictPrev(pdf, r, Value{Tok: tokDict, I: trailerOff})
 		case piulex.TokInt:
 			first, _, err := consumeInt(lit)
 			if err != nil {
@@ -465,21 +467,21 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	// Scalar entries; ISO 32000-1 7.5.8.2 requires them to be direct. That is
 	// not a convenience: an xref stream whose /Length were an indirect
 	// reference could not be read without the xref it defines.
-	size := codec.dictGetAccum(r, dictV, "Size", piulex.TokInt)
-	length := codec.dictGetAccum(r, dictV, "Length", piulex.TokInt)
-	wV := codec.dictGetAccum(r, dictV, "W", tokArray)
+	size := codec.dictGetAccum(pdf, r, dictV, "Size", piulex.TokInt)
+	length := codec.dictGetAccum(pdf, r, dictV, "Length", piulex.TokInt)
+	wV := codec.dictGetAccum(pdf, r, dictV, "W", tokArray)
 	if codec.accumErr != nil {
 		return 0, codec.accumErr
 	} else if size.I <= 0 || size.I > math.MaxUint32 || length.I < 0 {
 		return 0, errXrefStreamBad
 	}
-	sc, err := codec.readCodec(r, dictV)
+	sc, err := codec.readCodec(pdf, r, dictV)
 	if err != nil {
 		return 0, err
 	}
 	// /W is read into sc separately: readCodec serves object streams too, and
 	// only a cross-reference stream has a row layout.
-	sc.w, err = codec.readWidths(r, wV)
+	sc.w, err = codec.readWidths(pdf, r, wV)
 	if err != nil {
 		return 0, err
 	}
@@ -494,14 +496,14 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	if err = pdf.appendStreamSections(r, codec, dictV, proto, uint32(size.I)); err != nil {
 		return 0, err
 	}
-	return codec.dictPrev(r, dictV)
+	return codec.dictPrev(pdf, r, dictV)
 }
 
 // readWidths reads the three /W field widths, which are the row layout of a
 // cross-reference stream's records.
-func (codec *Codec) readWidths(r io.ReaderAt, wV Value) (w [3]uint8, err error) {
+func (codec *Codec) readWidths(pdf *PDF, r io.ReaderAt, wV Value) (w [3]uint8, err error) {
 	codec.auxcounter = 0
-	err = codec.ArrayForEach(r, wV, func(v Value) bool {
+	err = codec.ArrayForEach(pdf, r, wV, func(v Value) bool {
 		n, ok := v.Int()
 		ok = ok && n >= 0 && n <= 8 && codec.auxcounter < len(w)
 		if !ok {
@@ -528,7 +530,7 @@ func (codec *Codec) readWidths(r io.ReaderAt, wV Value) (w [3]uint8, err error) 
 // single range [0, /Size). proto carries the payload coordinates shared by
 // every subsection of the stream; only the object and row ranges differ.
 func (pdf *PDF) appendStreamSections(r io.ReaderAt, codec *Codec, dictV Value, proto xrefSection, size uint32) error {
-	idxV, err := codec.DictGet(r, dictV, "Index")
+	idxV, err := codec.DictGet(pdf, r, dictV, "Index")
 	if err != nil {
 		return err
 	}
@@ -540,7 +542,7 @@ func (pdf *PDF) appendStreamSections(r io.ReaderAt, codec *Codec, dictV Value, p
 	}
 	var first, rows uint32
 	codec.auxcounter = 0
-	err = codec.ArrayForEach(r, idxV, func(v Value) bool {
+	err = codec.ArrayForEach(pdf, r, idxV, func(v Value) bool {
 		n, ok := v.Int()
 		if !ok || n < 0 || n > math.MaxUint32 {
 			codec.accumErr = errXrefStreamBad
@@ -596,7 +598,7 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (XrefEntry, er
 		if num < s.firstObj || num >= s.firstObj+s.count {
 			continue
 		}
-		e, err := p.sectionEntry(r, s, num)
+		e, err := p.sectionEntry(r, codec, s, num)
 		if err != nil {
 			return XrefEntry{}, err
 		}
@@ -610,25 +612,17 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (XrefEntry, er
 
 // sectionEntry reads object num's record out of section s, whichever form it
 // takes.
-func (p *PDF) sectionEntry(r io.ReaderAt, s *xrefSection, num uint32) (XrefEntry, error) {
+func (p *PDF) sectionEntry(r io.ReaderAt, codec *Codec, s *xrefSection, num uint32) (XrefEntry, error) {
 	if s.isXrefStream {
-		rowlen := s.codec.rowLen()
-		// A row index within the decoded payload, not a byte offset into
-		// the file: subsections of one stream share a payload and index
-		// it cumulatively from rowFirst.
-		off := rowlen * (int64(s.rowFirst) + int64(num-s.firstObj))
-		// TODO: rows is the payload at [s.fileOff, +s.length) decoded per
-		// s.codec. Reaching this row means decoding every row before it —
-		// flate has no random access and PNG predictors chain row to row —
-		// so the Codec has to inflate and cache it, one stream at a time.
-		var rows []byte
-		if len(rows) == 0 {
-			return XrefEntry{}, errTODO
+		// A row index within the decoded payload, not a byte offset into the
+		// file: subsections of one stream share a payload and index it
+		// cumulatively from rowFirst.
+		row := int64(s.rowFirst) + int64(num-s.firstObj)
+		rec, err := codec.rows.at(r, s, row)
+		if err != nil {
+			return XrefEntry{}, err
 		}
-		if off < 0 || off+rowlen > int64(len(rows)) {
-			return XrefEntry{}, errXrefStreamBad
-		}
-		return parseStreamRecord(rows[off:off+rowlen], s.codec.w)
+		return parseStreamRecord(rec, s.codec.w)
 	}
 	rec := p.recbuf[:classicRecLen]
 	recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)

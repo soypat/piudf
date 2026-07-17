@@ -73,7 +73,7 @@ func (c *ctx) walkPages(node ppdf.Value, num int, seen *int, depth int) (ppdf.Va
 	if depth > maxPageDepth {
 		return ppdf.Value{}, fmt.Errorf("page tree deeper than %d: /Kids loop?", maxPageDepth)
 	}
-	kids, err := c.codec.DictGet(c.r, node, "Kids")
+	kids, err := c.codec.DictGet(c.pdf, c.r, node, "Kids")
 	if err != nil {
 		return ppdf.Value{}, err
 	}
@@ -92,7 +92,7 @@ func (c *ctx) walkPages(node ppdf.Value, num int, seen *int, depth int) (ppdf.Va
 	// recurse into another ArrayForEach: both share the Codec's lexer. So the
 	// references are collected first, then walked.
 	var refs []ppdf.ObjectID
-	err = c.codec.ArrayForEach(c.r, kids, func(v ppdf.Value) bool {
+	err = c.codec.ArrayForEach(c.pdf, c.r, kids, func(v ppdf.Value) bool {
 		if v.Tok == piulex.TokR {
 			refs = append(refs, v.ObjectID())
 		}
@@ -119,7 +119,7 @@ func (c *ctx) walkPages(node ppdf.Value, num int, seen *int, depth int) (ppdf.Va
 
 // deref reads key from dictionary dict and resolves it if indirect.
 func (c *ctx) deref(dict ppdf.Value, key string) (ppdf.Value, error) {
-	v, err := c.codec.DictGet(c.r, dict, key)
+	v, err := c.codec.DictGet(c.pdf, c.r, dict, key)
 	if err != nil {
 		return v, fmt.Errorf("/%s: %w", key, err)
 	}
@@ -133,7 +133,7 @@ func (c *ctx) deref(dict ppdf.Value, key string) (ppdf.Value, error) {
 // stream or an array of them, and an array is one stream cut at arbitrary
 // points — a text operator may straddle the seam — so they concatenate.
 func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
-	contents, err := c.codec.DictGet(c.r, page, "Contents")
+	contents, err := c.codec.DictGet(c.pdf, c.r, page, "Contents")
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 		if !arr.IsArray() {
 			return nil, fmt.Errorf("/Contents is %v, want a stream or array", arr.Tok)
 		}
-		err = c.codec.ArrayForEach(c.r, arr, func(v ppdf.Value) bool {
+		err = c.codec.ArrayForEach(c.pdf, c.r, arr, func(v ppdf.Value) bool {
 			if v.Tok == piulex.TokR {
 				refs = append(refs, v.ObjectID())
 			}

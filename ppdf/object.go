@@ -1,9 +1,9 @@
 package ppdf
 
 import (
-	"compress/zlib"
 	"io"
 
+	"github.com/soypat/piudf/ppdf/internal"
 	"github.com/soypat/piudf/ppdf/piulex"
 )
 
@@ -31,8 +31,7 @@ func (pdf *PDF) resolve(r io.ReaderAt, id ObjectID, codec *Codec) (Value, error)
 	case XrefFree:
 		return Value{Tok: piulex.TokNull}, nil
 	case XrefCompressed:
-		// TODO: object e.Stream is an object stream; needs the stream cache.
-		return Value{}, errTODO
+		return pdf.resolveCompressed(r, id, e.Stream, e.Offset, codec)
 	}
 	return codec.decodeObjectAt(r, e.Offset, id)
 }
@@ -117,11 +116,11 @@ func (pdf *PDF) streamPayload(r io.ReaderAt, v Value, codec *Codec) (StreamPaylo
 	if v.Tok != tokStream {
 		return StreamPayload{}, errNotAStream
 	}
-	sc, err := codec.readCodec(r, v)
+	sc, err := codec.readCodec(pdf, r, v)
 	if err != nil {
 		return StreamPayload{}, err
 	}
-	lengthV, err := codec.DictGet(r, v, "Length")
+	lengthV, err := codec.DictGet(pdf, r, v, "Length")
 	if err != nil {
 		return StreamPayload{}, err
 	}
@@ -135,7 +134,7 @@ func (pdf *PDF) streamPayload(r io.ReaderAt, v Value, codec *Codec) (StreamPaylo
 	if !ok || length < 0 {
 		return StreamPayload{}, errStreamBadLength
 	}
-	if err = codec.lexValueSpan(r, v); err != nil {
+	if err = codec.lexValueSpan(pdf, r, v); err != nil {
 		return StreamPayload{}, err
 	}
 	if _, err = codec.decodeShallow(); err != nil { // The dictionary.
@@ -167,21 +166,22 @@ func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, codec *Codec) (io.Reader, err
 
 // OpenPayload returns a reader over the decoded bytes of sp, for callers that
 // already located it.
+//
+// The returned reader is the caller's: it owns an inflate window of its own
+// rather than borrowing the Codec's, which is what lets it outlive the next
+// call on codec. Callers reading many streams and holding none — the shape the
+// package is built for — should reach for [PDF.Resolve] and friends instead,
+// which reuse the Codec's cursors.
 func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, codec *Codec) (io.Reader, error) {
-	raw := io.NewSectionReader(r, sp.Offset, sp.Length)
-	if !sp.codec.flate {
-		return raw, nil
-	}
 	if sp.codec.predictor > 1 {
-		// TODO: predictors; a cross-reference stream needs them, a content
-		// stream does not.
+		// TODO: predictors. A cross-reference stream needs them and reads rows
+		// rather than bytes, which is xrefRows' business; a content stream
+		// does not.
 		return nil, pdf.setError(codec, errTODO)
 	}
-	// TODO: zlib.NewReader allocates its window per call. A Codec-held
-	// zlib.Resetter would reuse it, which is what the root package does.
-	zr, err := zlib.NewReader(raw)
-	if err != nil {
+	s := new(internal.Stream)
+	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
 		return nil, pdf.setError(codec, err)
 	}
-	return zr, nil
+	return s, nil
 }

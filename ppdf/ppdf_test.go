@@ -25,7 +25,7 @@ func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return n, err
 }
 
-func openCounted(t *testing.T, name string) (*countingReaderAt, int64) {
+func openCounted(t testing.TB, name string) (*countingReaderAt, int64) {
 	t.Helper()
 	f, err := os.Open(name)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestArrayForEach(t *testing.T) {
 	const src = `[1 0 R 42 (s) [7 8] <</K 1>> /N]`
 	c := newCodec(make([]byte, 2048))
 	var got []Value
-	err := c.ArrayForEach(strings.NewReader(src), Value{Tok: tokArray, I: 0}, func(v Value) bool {
+	err := c.ArrayForEach(nil, strings.NewReader(src), Value{Tok: tokArray, I: 0}, func(v Value) bool {
 		got = append(got, v)
 		return true
 	})
@@ -84,7 +84,7 @@ func TestArrayForEach(t *testing.T) {
 func TestArrayForEachStopsEarly(t *testing.T) {
 	c := newCodec(make([]byte, 2048))
 	n := 0
-	err := c.ArrayForEach(strings.NewReader(`[1 2 3 4]`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+	err := c.ArrayForEach(nil, strings.NewReader(`[1 2 3 4]`), Value{Tok: tokArray, I: 0}, func(Value) bool {
 		n++
 		return n < 2
 	})
@@ -100,7 +100,7 @@ func TestArrayForEachStopsEarly(t *testing.T) {
 // is not the array terminator.
 func TestArrayForEachUnterminated(t *testing.T) {
 	c := newCodec(make([]byte, 2048))
-	err := c.ArrayForEach(strings.NewReader(`[1 2 3`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+	err := c.ArrayForEach(nil, strings.NewReader(`[1 2 3`), Value{Tok: tokArray, I: 0}, func(Value) bool {
 		return true
 	})
 	if err != errUnexpectedEOF {
@@ -117,7 +117,7 @@ func TestDictForEachKeys(t *testing.T) {
 	const src = `<</Size 5482/Root 4883 0 R/Prev 12/Info 5481 0 R>>`
 	c := newCodec(make([]byte, 2048))
 	var got []string
-	err := c.DictForEach(strings.NewReader(src), Value{Tok: tokDict, I: 0}, func(key []byte, v Value) bool {
+	err := c.DictForEach(nil, strings.NewReader(src), Value{Tok: tokDict, I: 0}, func(key []byte, v Value) bool {
 		got = append(got, string(key))
 		return true
 	})
@@ -134,7 +134,7 @@ func TestDictForEachKeys(t *testing.T) {
 		}
 	}
 	// DictGet rides on the same scan: a key it cannot see reads as absent.
-	v, err := c.DictGet(strings.NewReader(src), Value{Tok: tokDict, I: 0}, "Root")
+	v, err := c.DictGet(nil, strings.NewReader(src), Value{Tok: tokDict, I: 0}, "Root")
 	if err != nil {
 		t.Fatalf("DictGet: %v", err)
 	}
@@ -201,5 +201,165 @@ func TestDecodeClassicReadCount(t *testing.T) {
 	const maxReads = 12
 	if c.reads > maxReads {
 		t.Errorf("Decode took %d reads, want <=%d", c.reads, maxReads)
+	}
+}
+
+// TestLookupSweep walks every object of a cross-reference stream document. It
+// is the test the cursor exists for: the sweep asks for 15888 rows in order,
+// which one decode pass answers, and PDF holds no more at the end of it than
+// at the start. A design that cached the decoded table would pass the
+// correctness half of this and fail the held-size half.
+func TestLookupSweep(t *testing.T) {
+	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.MaxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	held := pdf.SizeOnRAM()
+	var kinds [4]int
+	var last uint32
+	for _, s := range pdf.sections {
+		last = max(last, s.firstObj+s.count)
+	}
+	for num := uint32(0); num < last; num++ {
+		e, err := pdf.Lookup(c, num, codec)
+		if err != nil {
+			t.Fatalf("object %d: %v", num, err)
+		}
+		if e.ID.Num != num {
+			t.Fatalf("object %d came back as %d", num, e.ID.Num)
+		}
+		switch e.Kind {
+		case XrefFree:
+			kinds[0]++
+		case XrefNormal:
+			kinds[1]++
+			if e.Offset <= 0 || e.Offset >= size {
+				t.Fatalf("object %d at offset %d, outside a %d byte file", num, e.Offset, size)
+			}
+		case XrefCompressed:
+			kinds[2]++
+		default:
+			t.Fatalf("object %d has kind %v", num, e.Kind)
+		}
+	}
+	t.Logf("%d objects: %d free, %d normal, %d compressed; %d reads, held %d B",
+		last, kinds[0], kinds[1], kinds[2], c.reads, held)
+	if kinds[1] == 0 || kinds[2] == 0 {
+		t.Error("expected both normal and compressed objects")
+	}
+	if now := pdf.SizeOnRAM(); now != held {
+		t.Errorf("held %d B before the sweep and %d B after: the sweep is caching", held, now)
+	}
+}
+
+// TestLookupBackward pins the cursor's one hard case. Rows are reachable only
+// forward, so a backward step restarts the decode from the payload's first
+// byte; a restart that kept any state — the row above, the inflate history —
+// would answer differently the second time.
+func TestLookupBackward(t *testing.T) {
+	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.MaxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	nums := [...]uint32{1, 2, 900, 5, 15000, 3, 1}
+	var fwd [len(nums)]XrefEntry
+	for i, num := range nums {
+		e, err := pdf.Lookup(c, num, codec)
+		if err != nil {
+			t.Fatalf("object %d: %v", num, err)
+		}
+		fwd[i] = e
+	}
+	if fwd[0] != fwd[len(nums)-1] {
+		t.Errorf("object 1 read as %+v, then as %+v after seeking away", fwd[0], fwd[len(nums)-1])
+	}
+	// The same objects in increasing order must agree with the jumping order.
+	for i, num := range nums {
+		var pdf2 PDF
+		codec2 := newCodec(make([]byte, 4096))
+		codec2.MaxLazySections = 4096
+		if err := pdf2.Decode(c, size, codec2); err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		e, err := pdf2.Lookup(c, num, codec2)
+		if err != nil {
+			t.Fatalf("object %d: %v", num, err)
+		}
+		if e != fwd[i] {
+			t.Errorf("object %d: %+v on a fresh cursor, %+v on a seeking one", num, e, fwd[i])
+		}
+	}
+}
+
+// TestResolveCompressed reads an object out of an object stream. The catalog
+// is the entry point every other object hangs off, so a /Pages that resolves
+// to a page tree node proves the whole chain: xref stream row, object stream
+// pair table, and a span whose coordinates address decompressed data.
+func TestResolveCompressed(t *testing.T) {
+	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.MaxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	rootRef, err := codec.DictGet(&pdf, c, pdf.Trailer(), "Root")
+	if err != nil {
+		t.Fatalf("/Root: %v", err)
+	}
+	root, err := pdf.Deref(c, rootRef, codec)
+	if err != nil {
+		t.Fatalf("resolving /Root: %v", err)
+	}
+	pagesRef, err := codec.DictGet(&pdf, c, root, "Pages")
+	if err != nil {
+		t.Fatalf("/Pages: %v", err)
+	}
+	pages, err := pdf.Deref(c, pagesRef, codec)
+	if err != nil {
+		t.Fatalf("resolving /Pages: %v", err)
+	}
+	if pages.Stm == 0 {
+		t.Fatal("/Pages is not in an object stream; this test proves nothing")
+	}
+	countV, err := codec.DictGet(&pdf, c, pages, "Count")
+	if err != nil {
+		t.Fatalf("/Count: %v", err)
+	}
+	count, ok := countV.Int()
+	if !ok || count <= 0 {
+		t.Fatalf("/Count is %v, want a positive integer", countV.Tok)
+	}
+	t.Logf("catalog in object stream, %d pages", count)
+}
+
+// TestLookupAllocs pins the claim the cursors are built on: a lookup decodes
+// through the Codec's own storage and the file, and neither escapes. The
+// inflate window is allocated once and reused, so it must not show up here.
+func TestLookupAllocs(t *testing.T) {
+	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.MaxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	num := uint32(0)
+	allocs := testing.AllocsPerRun(1000, func() {
+		// Increasing object numbers: the sweep the cursor is shaped for.
+		num++
+		if num > 15000 {
+			num = 1
+		}
+		pdf.Lookup(c, num, codec)
+	})
+	if allocs > 0 {
+		t.Errorf("Lookup allocates %.1f times per call", allocs)
 	}
 }

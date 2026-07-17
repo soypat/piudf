@@ -77,6 +77,11 @@ func (l *Lexer) Reset(r io.ReaderAt, off int64, buf []byte) error {
 	return l.w.Err()
 }
 
+// DropBuffered discards the file bytes the lexer holds, so the next token
+// re-reads them. Callers need it only for a reader that serves different bytes
+// at the same offset over time; see [internal.Window.Drop].
+func (l *Lexer) DropBuffered() { l.w.Drop() }
+
 func (l *Lexer) advance() {
 	l.pos++
 	l.ch, l.chvalid = l.w.ByteAt(l.pos)

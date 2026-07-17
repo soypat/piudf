@@ -37,7 +37,7 @@ func cmdInfo(c *ctx, args []string) error {
 
 	tr := c.pdf.Trailer()
 	for _, key := range []string{"Size", "Root", "Info", "Encrypt"} {
-		v, err := c.codec.DictGet(c.r, tr, key)
+		v, err := c.codec.DictGet(c.pdf, c.r, tr, key)
 		if err != nil {
 			return fmt.Errorf("trailer /%s: %w", key, err)
 		}
@@ -66,7 +66,7 @@ func cmdTrailer(c *ctx, args []string) error {
 	fmt.Fprintf(w, "trailer @%#x\n", tr.I)
 	// DictForEach hands back a key and a shallow Value per entry in one scan;
 	// the callback must not hold key, which points into the Codec's arena.
-	return c.codec.DictForEach(c.r, tr, func(key []byte, v ppdf.Value) bool {
+	return c.codec.DictForEach(c.pdf, c.r, tr, func(key []byte, v ppdf.Value) bool {
 		fmt.Fprintf(w, "  /%-12s %s\n", key, vstr(c, v))
 		return true
 	})
