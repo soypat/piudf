@@ -10,6 +10,11 @@ import (
 	"github.com/soypat/piudf/piulex"
 )
 
+const (
+	fpathBook    = "testdata/sto.pdf"
+	fpathMCUSpec = "testdata/rp2350-datasheet.pdf"
+)
+
 // countingReaderAt records the reads a Decode issues. Read count is the
 // primary regression metric of the window rewrite: correctness alone would
 // not notice the buffer being discarded on every jump.
@@ -155,7 +160,7 @@ func TestDictForEachKeys(t *testing.T) {
 // payload being decoded, because /Prev and /W live in the plaintext stream
 // dictionary.
 func TestDecodeXrefStream(t *testing.T) {
-	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	c, size := openCounted(t, fpathMCUSpec)
 	var pdf PDF
 	if err := pdf.Decode(c, size, newCodec(make([]byte, 4096))); err != nil {
 		t.Fatalf("Decode: %v", err)
@@ -192,7 +197,7 @@ func TestDecodeXrefStream(t *testing.T) {
 // whose trailers sit within a few hundred bytes of each other. Before the
 // window each jump refilled, costing ~26 reads.
 func TestDecodeClassicReadCount(t *testing.T) {
-	c, size := openCounted(t, "../testdata/sto.pdf")
+	c, size := openCounted(t, fpathBook)
 	var pdf PDF
 	if err := pdf.Decode(c, size, newCodec(make([]byte, 4096))); err != nil {
 		t.Fatalf("Decode: %v", err)
@@ -217,7 +222,7 @@ func TestDecodeClassicReadCount(t *testing.T) {
 // at the start. A design that cached the decoded table would pass the
 // correctness half of this and fail the held-size half.
 func TestLookupSweep(t *testing.T) {
-	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	c, size := openCounted(t, fpathMCUSpec)
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
 	codec.maxLazySections = 4096
@@ -267,7 +272,7 @@ func TestLookupSweep(t *testing.T) {
 // byte; a restart that kept any state — the row above, the inflate history —
 // would answer differently the second time.
 func TestLookupBackward(t *testing.T) {
-	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	c, size := openCounted(t, fpathMCUSpec)
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
 	codec.maxLazySections = 4096
@@ -308,7 +313,7 @@ func TestLookupBackward(t *testing.T) {
 // to a page tree node proves the whole chain: xref stream row, object stream
 // pair table, and a span whose coordinates address decompressed data.
 func TestResolveCompressed(t *testing.T) {
-	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	c, size := openCounted(t, fpathMCUSpec)
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
 	codec.maxLazySections = 4096
@@ -349,7 +354,7 @@ func TestResolveCompressed(t *testing.T) {
 // through the Codec's own storage and the file, and neither escapes. The
 // inflate window is allocated once and reused, so it must not show up here.
 func TestLookupAllocs(t *testing.T) {
-	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	c, size := openCounted(t, fpathMCUSpec)
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
 	codec.maxLazySections = 4096
@@ -447,8 +452,8 @@ func TestAppendStringMismatch(t *testing.T) {
 // through the row cursor with a catalog inside an object stream. Reading
 // either moves every cursor the other one uses.
 func TestValueDurability(t *testing.T) {
-	rA, sizeA := openCounted(t, "../testdata/sto.pdf")
-	rB, sizeB := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	rA, sizeA := openCounted(t, fpathBook)
+	rB, sizeB := openCounted(t, fpathMCUSpec)
 	codec := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
 
 	// One Codec, two documents. The Codec is the scratch both share; the

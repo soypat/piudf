@@ -2,35 +2,151 @@ package canvas
 
 import ppdf "github.com/soypat/piudf"
 
-// This file will carry the Adobe AFM advance-width tables for the Helvetica
-// family (per-1000-em widths keyed by WinAnsi byte) and the CP1252/WinAnsi
-// rune->byte map. First cut ships the Helvetica fonts the invoice uses; the
-// remaining standard-14 tables are additive.
+// Adobe AFM advance-width tables for the Helvetica family, indexed by WinAnsi
+// byte, in units of 1/1000 em. First cut ships the two weights the invoice
+// uses; the rest of the standard-14 tables are purely additive.
 
-// helveticaWidths is the AFM advance table for Helvetica, WinAnsi-keyed.
-// TODO: populate from the Adobe AFM metrics.
-var helveticaWidths [256]int16
+var helveticaWidths = [256]int16{
+	0x20: 278, 0x21: 278, 0x22: 355, 0x23: 556, 0x24: 556, 0x25: 889, 0x26: 667, 0x27: 191,
+	0x28: 333, 0x29: 333, 0x2a: 389, 0x2b: 584, 0x2c: 278, 0x2d: 333, 0x2e: 278, 0x2f: 278,
+	0x30: 556, 0x31: 556, 0x32: 556, 0x33: 556, 0x34: 556, 0x35: 556, 0x36: 556, 0x37: 556,
+	0x38: 556, 0x39: 556, 0x3a: 278, 0x3b: 278, 0x3c: 584, 0x3d: 584, 0x3e: 584, 0x3f: 556,
+	0x40: 1015, 0x41: 667, 0x42: 667, 0x43: 722, 0x44: 722, 0x45: 667, 0x46: 611, 0x47: 778,
+	0x48: 722, 0x49: 278, 0x4a: 500, 0x4b: 667, 0x4c: 556, 0x4d: 833, 0x4e: 722, 0x4f: 778,
+	0x50: 667, 0x51: 778, 0x52: 722, 0x53: 667, 0x54: 611, 0x55: 722, 0x56: 667, 0x57: 944,
+	0x58: 667, 0x59: 667, 0x5a: 611, 0x5b: 278, 0x5c: 278, 0x5d: 278, 0x5e: 469, 0x5f: 556,
+	0x60: 333, 0x61: 556, 0x62: 556, 0x63: 500, 0x64: 556, 0x65: 556, 0x66: 278, 0x67: 556,
+	0x68: 556, 0x69: 222, 0x6a: 222, 0x6b: 500, 0x6c: 222, 0x6d: 833, 0x6e: 556, 0x6f: 556,
+	0x70: 556, 0x71: 556, 0x72: 333, 0x73: 500, 0x74: 278, 0x75: 556, 0x76: 500, 0x77: 722,
+	0x78: 500, 0x79: 500, 0x7a: 500, 0x7b: 334, 0x7c: 260, 0x7d: 334, 0x7e: 584,
+	0x96: 556, 0x97: 1000, 0xa0: 278,
+	0xdf: 611, 0xe1: 556, 0xe4: 556, 0xe9: 556, 0xed: 278, 0xf1: 556,
+	0xf3: 556, 0xf6: 556, 0xfa: 556, 0xfc: 556,
+}
 
-// helveticaBoldWidths is the AFM advance table for Helvetica-Bold.
-// TODO: populate from the Adobe AFM metrics.
-var helveticaBoldWidths [256]int16
+var helveticaBoldWidths = [256]int16{
+	0x20: 278, 0x21: 333, 0x22: 474, 0x23: 556, 0x24: 556, 0x25: 889, 0x26: 722, 0x27: 238,
+	0x28: 333, 0x29: 333, 0x2a: 389, 0x2b: 584, 0x2c: 278, 0x2d: 333, 0x2e: 278, 0x2f: 278,
+	0x30: 556, 0x31: 556, 0x32: 556, 0x33: 556, 0x34: 556, 0x35: 556, 0x36: 556, 0x37: 556,
+	0x38: 556, 0x39: 556, 0x3a: 333, 0x3b: 333, 0x3c: 584, 0x3d: 584, 0x3e: 584, 0x3f: 611,
+	0x40: 975, 0x41: 722, 0x42: 722, 0x43: 722, 0x44: 722, 0x45: 667, 0x46: 611, 0x47: 778,
+	0x48: 722, 0x49: 278, 0x4a: 556, 0x4b: 722, 0x4c: 611, 0x4d: 833, 0x4e: 722, 0x4f: 778,
+	0x50: 667, 0x51: 778, 0x52: 722, 0x53: 667, 0x54: 611, 0x55: 722, 0x56: 667, 0x57: 944,
+	0x58: 667, 0x59: 667, 0x5a: 611, 0x5b: 333, 0x5c: 278, 0x5d: 333, 0x5e: 584, 0x5f: 556,
+	0x60: 333, 0x61: 556, 0x62: 611, 0x63: 556, 0x64: 611, 0x65: 556, 0x66: 333, 0x67: 611,
+	0x68: 611, 0x69: 278, 0x6a: 278, 0x6b: 556, 0x6c: 278, 0x6d: 889, 0x6e: 611, 0x6f: 611,
+	0x70: 611, 0x71: 611, 0x72: 389, 0x73: 556, 0x74: 333, 0x75: 611, 0x76: 556, 0x77: 778,
+	0x78: 556, 0x79: 556, 0x7a: 500, 0x7b: 389, 0x7c: 280, 0x7d: 389, 0x7e: 584,
+	0x96: 556, 0x97: 1000, 0xa0: 278,
+	0xdf: 611, 0xe1: 556, 0xe4: 556, 0xe9: 556, 0xed: 278, 0xf1: 611,
+	0xf3: 611, 0xf6: 611, 0xfa: 611, 0xfc: 611,
+}
 
-// winansiByte maps a rune to its WinAnsi (CP1252) code, ok=false when the rune
-// has no WinAnsi representation.
-func winansiByte(r rune) (b byte, ok bool) { panic("todo: canvas.winansiByte") }
+// winansiByte maps a rune to its WinAnsi (CP1252) code. ASCII and Latin-1 upper
+// (0xA0..0xFF, where WinAnsi coincides with Latin-1) map directly; the
+// 0x80..0x9F WinAnsi typographic glyphs are keyed by their Unicode code point.
+// ok is false for a rune with no WinAnsi representation.
+func winansiByte(r rune) (b byte, ok bool) {
+	switch {
+	case r >= 0x20 && r <= 0x7e:
+		return byte(r), true
+	case r >= 0xa0 && r <= 0xff:
+		return byte(r), true
+	}
+	switch r {
+	case 0x20ac:
+		return 0x80, true
+	case 0x201a:
+		return 0x82, true
+	case 0x0192:
+		return 0x83, true
+	case 0x201e:
+		return 0x84, true
+	case 0x2026:
+		return 0x85, true
+	case 0x2020:
+		return 0x86, true
+	case 0x2021:
+		return 0x87, true
+	case 0x02c6:
+		return 0x88, true
+	case 0x2030:
+		return 0x89, true
+	case 0x0160:
+		return 0x8a, true
+	case 0x2039:
+		return 0x8b, true
+	case 0x0152:
+		return 0x8c, true
+	case 0x017d:
+		return 0x8e, true
+	case 0x2018:
+		return 0x91, true
+	case 0x2019:
+		return 0x92, true
+	case 0x201c:
+		return 0x93, true
+	case 0x201d:
+		return 0x94, true
+	case 0x2022:
+		return 0x95, true
+	case 0x2013:
+		return 0x96, true
+	case 0x2014:
+		return 0x97, true
+	case 0x02dc:
+		return 0x98, true
+	case 0x2122:
+		return 0x99, true
+	case 0x0161:
+		return 0x9a, true
+	case 0x203a:
+		return 0x9b, true
+	case 0x0153:
+		return 0x9c, true
+	case 0x017e:
+		return 0x9e, true
+	case 0x0178:
+		return 0x9f, true
+	}
+	return 0, false
+}
 
 func (f *stdFont) BaseName() string { return f.base }
 
 func (f *stdFont) Width(r rune) float64 {
-	panic("todo: stdFont.Width")
+	b, ok := winansiByte(r)
+	if !ok {
+		b = '?'
+	}
+	w := f.widths[b]
+	if w == 0 {
+		w = f.widths['?'] // unmapped-but-present code falls back to '?'
+	}
+	return float64(w) / 1000
 }
 
 func (f *stdFont) Encode(dst []byte, r rune) []byte {
-	panic("todo: stdFont.Encode")
+	b, ok := winansiByte(r)
+	if !ok {
+		b = '?'
+	}
+	return append(dst, b)
 }
 
 func (f *stdFont) writeObjects(enc *ppdf.Encoder) (ppdf.ObjectID, error) {
-	// Emits << /Type /Font /Subtype /Type1 /BaseFont f.base
-	//          /Encoding /WinAnsiEncoding >>
-	panic("todo: stdFont.writeObjects")
+	id := enc.NewID()
+	enc.BeginObject(id)
+	enc.DictOpen()
+	enc.Name("Type")
+	enc.Name("Font")
+	enc.Name("Subtype")
+	enc.Name("Type1")
+	enc.Name("BaseFont")
+	enc.Name(f.base)
+	enc.Name("Encoding")
+	enc.Name("WinAnsiEncoding")
+	enc.DictClose()
+	enc.EndObject()
+	return id, enc.Err()
 }

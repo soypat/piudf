@@ -1,6 +1,10 @@
 package doc
 
-import canvas "github.com/soypat/piudf/piupage"
+import (
+	"image/color"
+
+	canvas "github.com/soypat/piudf/piupage"
+)
 
 // Spacer is vertical blank space between flowables.
 type Spacer struct {
@@ -11,19 +15,40 @@ type Spacer struct {
 func (s Spacer) Wrap(availWidth float64) (w, h float64) { return availWidth, s.H }
 
 // Draw paints nothing; the spacer only consumes vertical space.
-func (s Spacer) Draw(c *canvas.Canvas, x, yTop float64) {}
+func (s Spacer) Draw(c *canvas.Canvas, x, yTop, availWidth float64) {}
 
 // HRule is a horizontal rule, the reportlab HRFlowable analogue.
 type HRule struct {
 	Width       float64 // 0 or negative means the full available width
 	Thickness   float64
-	Color       canvas.Color
+	Color       color.Color
 	SpaceBefore float64
 	SpaceAfter  float64
 }
 
 // Wrap reports the rule's height including its surrounding space.
-func (h HRule) Wrap(availWidth float64) (w, height float64) { panic("todo: HRule.Wrap") }
+func (h HRule) Wrap(availWidth float64) (w, height float64) {
+	t := h.Thickness
+	if t <= 0 {
+		t = 1
+	}
+	return availWidth, h.SpaceBefore + t + h.SpaceAfter
+}
 
-// Draw strokes the rule.
-func (h HRule) Draw(c *canvas.Canvas, x, yTop float64) { panic("todo: HRule.Draw") }
+// Draw strokes the rule across the available width at (x, yTop).
+func (h HRule) Draw(c *canvas.Canvas, x, yTop, availWidth float64) {
+	t := h.Thickness
+	if t <= 0 {
+		t = 1
+	}
+	w := h.Width
+	if w <= 0 {
+		w = availWidth
+	}
+	col := color.Color(color.Black)
+	if h.Color != nil {
+		col = h.Color
+	}
+	y := yTop - h.SpaceBefore - t/2
+	c.Line(x, y, x+w, y, t, col)
+}

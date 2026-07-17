@@ -329,7 +329,7 @@ func readAll(t *testing.T, r io.ReaderAt, size int64) []byte {
 // TestEncoderAppendClassic shadows into a classic-table document with many
 // revisions already in its chain.
 func TestEncoderAppendClassic(t *testing.T) {
-	appendShadow(t, "../testdata/sto.pdf")
+	appendShadow(t, fpathBook)
 }
 
 // TestEncoderAppendXrefStream shadows into a 1.5 document: the appended
@@ -337,7 +337,7 @@ func TestEncoderAppendClassic(t *testing.T) {
 // and the catalog's entries live in object streams, so CopyValue reads spans
 // out of decompressed space.
 func TestEncoderAppendXrefStream(t *testing.T) {
-	appendShadow(t, "../testdata/rp2350-datasheet.pdf")
+	appendShadow(t, fpathMCUSpec)
 }
 
 // TestEncoderRewriteWithinRevision writes the same object twice before Close:
