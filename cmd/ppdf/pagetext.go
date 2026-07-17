@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"strconv"
 
 	"github.com/soypat/piudf/ppdf"
@@ -33,7 +32,16 @@ func cmdPageText(c *ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	return showText(c, content, stdout())
+	fonts, err := pageFonts(c, page)
+	if err != nil {
+		return err
+	}
+	dst, err := showText(nil, content, fonts)
+	if err != nil {
+		return err
+	}
+	stdout().Write(dst)
+	return nil
 }
 
 // findPage returns the dictionary of page num, 1-based, by walking the page
@@ -177,27 +185,31 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 // the last line first. Getting reading order means sorting by the text matrix,
 // which means tracking it.
 //
-// Bytes are written as they appear in the string operands. Mapping them to
-// runes needs the font's /Encoding and /ToUnicode, so anything but simple
-// ASCII-ish encodings comes out wrong here.
-func showText(c *ctx, content []byte, w io.Writer) error {
+// A string operand holds codes, not characters, so each is decoded through
+// the font the last Tf selected.
+func showText(dst []byte, content []byte, fonts map[string]*font) ([]byte, error) {
 	var lx piulex.Lexer
 	lx.ReuseLiteralBuffer = true
 	buf := make([]byte, 4096)
 	lx.MaxLiteral = len(buf)
 	if err := lx.Reset(bytes.NewReader(content), 0, buf); err != nil {
-		return err
+		return dst, err
 	}
-	// pending holds the string operands seen since the last operator: TJ
-	// takes an array of them, every other show operator takes one.
+	// pending holds the operands seen since the last operator: TJ takes an
+	// array of strings, Tf takes the resource name of a font.
 	var pending [][]byte
+	var lastName string
+	var cur *font
 	for {
 		tok, _, lit := lx.NextToken()
 		switch tok {
 		case piulex.TokEOF:
-			return nil
+			return dst, nil
 		case piulex.TokIllegal:
-			return lx.Err()
+			return dst, lx.Err()
+		case piulex.TokName:
+			lastName = string(lit)
+			continue
 		case piulex.TokString, piulex.TokHexString:
 			// lit dies at the next token; the operator that consumes it is at
 			// least one token away.
@@ -205,25 +217,32 @@ func showText(c *ctx, content []byte, w io.Writer) error {
 			continue
 		case piulex.TokIdent:
 			switch string(lit) {
+			case "Tf":
+				// Tf's operands are a font resource name and a size. An
+				// unknown name leaves cur nil, which decodes as raw bytes.
+				cur = fonts[lastName]
 			case "Tj", "'", "\"":
 				// The operand is the last string: ' and " take other operands
 				// before it.
 				if n := len(pending); n > 0 {
-					w.Write(pending[n-1])
+					dst = cur.decode(dst, pending[n-1])
 				}
 			case "TJ":
-				// The array's numbers are kerning, which the lexer already
-				// left out of pending. Enough of them means a space, but
-				// deciding that needs the font's widths.
+				// TJ's array interleaves strings with kerning numbers, which
+				// are not operands of interest. Enough negative kerning means
+				// a space, but deciding that needs the font's widths.
 				for _, s := range pending {
-					w.Write(s)
+					dst = cur.decode(dst, s)
 				}
 			case "ET":
 				// One text object per line: the coarsest split that does not
 				// require the text matrix.
-				fmt.Fprintln(w)
+				dst = append(dst, '\n')
 			}
+			// Operands belong to the operator that just consumed them. Only
+			// an operator ends them: a number between two strings inside a TJ
+			// array is not a new statement.
+			pending = pending[:0]
 		}
-		pending = pending[:0]
 	}
 }
