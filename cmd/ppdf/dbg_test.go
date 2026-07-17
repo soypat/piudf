@@ -15,8 +15,12 @@ func openCtx(t *testing.T, path string) *ctx {
 	}
 	t.Cleanup(func() { f.Close() })
 	st, _ := f.Stat()
-	codec := &ppdf.Codec{MaxLazySections: 4096, MaxDepth: 64}
-	codec.SetBuffer(make([]byte, 8192))
+	codec := new(ppdf.Codec)
+	if err := codec.Configure(ppdf.DecoderConfig{
+		Buffer: make([]byte, 8192), MaxLazySections: 4096, MaxDepth: 64,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	c := &ctx{pdf: new(ppdf.PDF), codec: codec, r: f, size: st.Size(), path: path}
 	c.decodeErr = c.pdf.Decode(c.r, c.size, c.codec)
 	return c

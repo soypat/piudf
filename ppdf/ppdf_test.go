@@ -40,8 +40,14 @@ func openCounted(t testing.TB, name string) (*countingReaderAt, int64) {
 }
 
 func newCodec(buf []byte) *Codec {
-	c := &Codec{MaxLazySections: 64, MaxDepth: 32}
-	c.SetBuffer(buf)
+	return newCodecCfg(DecoderConfig{Buffer: buf, MaxLazySections: 64, MaxDepth: 32})
+}
+
+func newCodecCfg(cfg DecoderConfig) *Codec {
+	c := new(Codec)
+	if err := c.Configure(cfg); err != nil {
+		panic(err)
+	}
 	return c
 }
 
@@ -213,7 +219,7 @@ func TestLookupSweep(t *testing.T) {
 	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
-	codec.MaxLazySections = 4096
+	codec.maxLazySections = 4096
 	if err := pdf.Decode(c, size, codec); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -263,7 +269,7 @@ func TestLookupBackward(t *testing.T) {
 	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
-	codec.MaxLazySections = 4096
+	codec.maxLazySections = 4096
 	if err := pdf.Decode(c, size, codec); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -282,8 +288,7 @@ func TestLookupBackward(t *testing.T) {
 	// The same objects in increasing order must agree with the jumping order.
 	for i, num := range nums {
 		var pdf2 PDF
-		codec2 := newCodec(make([]byte, 4096))
-		codec2.MaxLazySections = 4096
+		codec2 := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
 		if err := pdf2.Decode(c, size, codec2); err != nil {
 			t.Fatalf("Decode: %v", err)
 		}
@@ -305,7 +310,7 @@ func TestResolveCompressed(t *testing.T) {
 	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
-	codec.MaxLazySections = 4096
+	codec.maxLazySections = 4096
 	if err := pdf.Decode(c, size, codec); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -346,7 +351,7 @@ func TestLookupAllocs(t *testing.T) {
 	c, size := openCounted(t, "../testdata/rp2350-datasheet.pdf")
 	var pdf PDF
 	codec := newCodec(make([]byte, 4096))
-	codec.MaxLazySections = 4096
+	codec.maxLazySections = 4096
 	if err := pdf.Decode(c, size, codec); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}

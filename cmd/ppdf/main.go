@@ -91,10 +91,30 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	codec := &ppdf.Codec{MaxLazySections: 4096, MaxDepth: 64}
-	codec.SetBuffer(make([]byte, 8192))
+	cfg := ppdf.DecoderConfig{
+		Buffer:          make([]byte, 8192),
+		MaxLazySections: 4096,
+		MaxDepth:        64,
+	}
+	codec := new(ppdf.Codec)
+	if err := codec.Configure(cfg); err != nil {
+		fatal(err)
+	}
 	c := &ctx{pdf: new(ppdf.PDF), codec: codec, r: f, size: st.Size(), path: path}
 	c.decodeErr = c.pdf.Decode(c.r, c.size, c.codec)
+	// Now that the document is indexed it can say what caching its
+	// cross-reference rows costs, which is knowable no earlier. This tool
+	// reads one document and exits, so it buys them: a page deep in a file
+	// resolves objects in no particular order, and every backward step without
+	// a cache is another decode of the table.
+	if c.decodeErr == nil {
+		if n := c.pdf.XrefCacheSize(); n > 0 {
+			cfg.XrefCache = make([]byte, n)
+			if err := codec.Configure(cfg); err != nil {
+				fatal(err)
+			}
+		}
+	}
 	if err := cmd.run(c, os.Args[3:]); err != nil {
 		fatal(err)
 	}

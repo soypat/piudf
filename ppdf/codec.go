@@ -41,10 +41,78 @@ type Codec struct {
 	stm  objStm
 
 	accumErr        error
-	MaxLazySections int
-	MaxDepth        int
+	maxLazySections int
+	maxDepth        int
 	auxcounter      int
 	auxkey          string
+}
+
+// MinBufferSize is the smallest [DecoderConfig.Buffer] a Codec accepts. The
+// arena is split into two windows, so it is twice what one window needs to
+// hold a dictionary worth of tokens.
+const MinBufferSize = 2048
+
+// DecoderConfig is the memory a Codec works out of and the bounds it works
+// within. It is the whole of the Codec's configuration: the fields are
+// unexported so that what a Codec may spend is decided once, by the caller,
+// and cannot drift underneath a decode in progress.
+//
+// Every buffer here stays the caller's. The Codec keeps the slices, never
+// grows them, and allocates nothing else of its own beyond the inflate windows
+// compress/flate insists on owning.
+type DecoderConfig struct {
+	// Buffer is the arena the Codec reads through: the lexer's window over the
+	// file, and the window over the cross-reference records. At least
+	// [MinBufferSize] bytes. Larger spans more of the file per read and bounds
+	// nothing else — literals build in the lexer's own buffer.
+	Buffer []byte
+
+	// XrefCache is optional storage for decoded cross-reference rows, and is
+	// the difference between a lookup costing a bounds check and costing a
+	// decode.
+	//
+	// It matters only for documents whose cross-reference table is a stream
+	// (PDF 1.5 and later). Such a table is compressed, and compression has no
+	// random access: a row is reachable only by decoding every row before it.
+	// Without a cache the Codec keeps its place and decodes forward, which
+	// makes an ascending sweep free and a backward jump cost the stream from
+	// its first byte. With one, rows are kept as they are decoded and any row
+	// already seen is a bounds check.
+	//
+	// The cache holds a prefix of one stream's rows — as many as fit — so a
+	// partial buffer is not wasted: it serves the rows it covers and the
+	// cursor serves the rest. [PDF.XrefCacheSize] reports what covering the
+	// whole document takes. A nil XrefCache is the cursor alone, which holds
+	// two rows and is what keeps [PDF.SizeOnRAM] flat.
+	XrefCache []byte
+
+	// MaxLazySections caps the cross-reference subsections a document may
+	// record. Each costs ~40 bytes of PDF and files rarely exceed a dozen,
+	// even after many incremental updates.
+	MaxLazySections int
+
+	// MaxDepth caps how deeply dictionaries and arrays may nest. It costs a
+	// counter, not memory.
+	MaxDepth int
+}
+
+// Configure hands c the memory and bounds of cfg, replacing any earlier
+// configuration. It reports what is wrong with cfg rather than discovering it
+// mid-decode.
+func (c *Codec) Configure(cfg DecoderConfig) error {
+	switch {
+	case len(cfg.Buffer) < MinBufferSize:
+		return io.ErrShortBuffer
+	case cfg.MaxLazySections < 1, cfg.MaxDepth < 1:
+		return ErrInvalidCodecConfig
+	}
+	c.buf = cfg.Buffer
+	c.maxLazySections = cfg.MaxLazySections
+	c.maxDepth = cfg.MaxDepth
+	// The cursor holds the cache rather than the Codec: it is the only thing
+	// that fills it, and it alone knows when what it holds stops being true.
+	c.rows.setCache(cfg.XrefCache)
+	return nil
 }
 
 // maxNameLen is the name length ISO 32000-1 Annex C.2 requires an
@@ -298,10 +366,6 @@ func (c *Codec) lexAt(r io.ReaderAt, off int64) error {
 	return c.lex.Reset(r, off, c.lexbuf())
 }
 
-// SetBuffer hands c the arena it works out of. c keeps b; it allocates
-// nothing else and never grows it.
-func (c *Codec) SetBuffer(b []byte) { c.buf = b }
-
 // lexbuf and recbuf split the caller's arena into the two windows the Codec
 // reads through. They are separate because object bodies and the xref record
 // array are two distinct access streams: resolving an object alternates
@@ -309,16 +373,13 @@ func (c *Codec) SetBuffer(b []byte) { c.buf = b }
 func (c *Codec) lexbuf() []byte { return c.buf[:len(c.buf)/2] }
 func (c *Codec) recbuf() []byte { return c.buf[len(c.buf)/2:] }
 
-func (c *Codec) Validate() (err error) {
-	// Two windows out of one arena, so twice the single-window minimum.
-	const minbufsize = 2048
-	switch {
-	case len(c.buf) < minbufsize:
-		err = io.ErrShortBuffer
-	case c.MaxLazySections < 1:
-		err = ErrInvalidCodecConfig
+// validate reports a Codec that Configure never accepted, which is the only
+// way one reaches a decode unusable.
+func (c *Codec) validate() error {
+	if len(c.buf) < MinBufferSize || c.maxLazySections < 1 || c.maxDepth < 1 {
+		return ErrInvalidCodecConfig
 	}
-	return err
+	return nil
 }
 
 func (d *Codec) nextValue(tok piulex.Token, elseErr error) (v Value) {
@@ -451,7 +512,7 @@ func (d *Codec) skipComposite() (end piulex.Pos, err error) {
 		switch tv.Tok {
 		case piulex.TokDictOpen, piulex.TokArrayOpen:
 			depth++
-			if depth > d.MaxDepth {
+			if depth > d.maxDepth {
 				return 0, ErrCodecDepthLimit // fmt.Errorf("%w: nesting deeper than %d at %v", ErrCorrupt, d.maxDepth, tv.pos)
 			}
 		case piulex.TokDictClose, piulex.TokArrayClose:

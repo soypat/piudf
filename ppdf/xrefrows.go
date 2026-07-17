@@ -24,6 +24,13 @@ const maxXrefRowLen = 24
 // costs — is still one decode pass, because object order is row order.
 type xrefRows struct {
 	data internal.Stream
+	// cache is the caller's, from DecoderConfig, and holds rows [0, cached) of
+	// the stream the cursor is on: a prefix, because that is what a forward
+	// decode produces and a prefix is what a bounds check can serve. Rows past
+	// it — or all of them, when the caller supplied none — cost the decode
+	// they always did.
+	cache  []byte
+	cached int64
 	// row is the index of the row in buf[which]; -1 before the first is
 	// decoded.
 	row     int64
@@ -39,13 +46,29 @@ type xrefRows struct {
 	ft [1]byte
 }
 
+// setCache hands x the caller's row storage. What is cached describes the
+// stream the cursor was on, so replacing the storage forgets it.
+func (x *xrefRows) setCache(b []byte) {
+	x.cache, x.cached = b, 0
+}
+
 // at returns row i of section s's stream. The returned bytes live in x and die
 // at the next call.
 func (x *xrefRows) at(r io.ReaderAt, s *xrefSection, i int64) ([]byte, error) {
-	if x.data.Reader() != r || x.data.Offset() != s.fileOff || i < x.row {
-		// A different file, a different stream, or a step backward: none can
-		// be served by the open decode. The payload offset identifies the
-		// stream, since every subsection of one shares it.
+	// The payload offset identifies the stream, since every subsection of one
+	// shares it.
+	if x.data.Reader() != r || x.data.Offset() != s.fileOff {
+		// A different file or a different stream: the cache describes neither.
+		x.cached = 0
+		if err := x.restart(r, s); err != nil {
+			return nil, err
+		}
+	} else if i < x.cached {
+		return x.cache[i*int64(x.rowlen):][:x.rowlen], nil
+	} else if i < x.row {
+		// A step backward past what is cached: the bytes are gone and only the
+		// decode can make them again. The cache survives — it holds the same
+		// stream's rows, and they have not changed.
 		if err := x.restart(r, s); err != nil {
 			return nil, err
 		}
@@ -105,6 +128,15 @@ func (x *xrefRows) next() error {
 	}
 	x.row++
 	x.which = 1 - x.which
+	// Keep it if the caller gave room. Only the row extending the prefix is
+	// kept: a hole would make a hit a search rather than a bounds check, and
+	// the rows arrive in prefix order anyway.
+	if x.row == x.cached {
+		if off := x.row * int64(x.rowlen); off+int64(x.rowlen) <= int64(len(x.cache)) {
+			copy(x.cache[off:], x.buf[x.which][:x.rowlen])
+			x.cached++
+		}
+	}
 	return nil
 }
 

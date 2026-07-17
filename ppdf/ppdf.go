@@ -297,6 +297,31 @@ func (pdf *PDF) SizeOnRAM() int {
 		cap(pdf.revs)*int(unsafe.Sizeof(Revision{}))
 }
 
+// XrefCacheSize returns the [DecoderConfig.XrefCache] bytes that would hold
+// every cross-reference row of pdf, so a caller can size the buffer from the
+// document rather than guess at it. It is zero when the document has no
+// cross-reference stream: a classic table is random-access on disk and is read
+// a record at a time, so nothing is cached and nothing needs to be.
+//
+// The figure is what buying O(1) lookups costs, and buying them is optional —
+// see [DecoderConfig.XrefCache]. A smaller buffer is not refused; it caches
+// what it covers.
+func (pdf *PDF) XrefCacheSize() int {
+	var rows, rowlen int64
+	for i := range pdf.sections {
+		s := &pdf.sections[i]
+		if !s.isXrefStream {
+			continue
+		}
+		// Sections of one stream index a shared payload cumulatively, and the
+		// cursor caches one stream at a time, so the answer is the widest row
+		// over the most rows any one of them reaches.
+		rows = max(rows, int64(s.rowFirst)+int64(s.count))
+		rowlen = max(rowlen, s.codec.rowLen())
+	}
+	return int(rows * rowlen)
+}
+
 func (pdf *PDF) Reset() {
 	pdf.sections = pdf.sections[:0]
 	pdf.revs = pdf.revs[:0]
@@ -315,7 +340,7 @@ func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
 }
 
 func (pdf *PDF) decode(r io.ReaderAt, size int64, codec *Codec) error {
-	err := codec.Validate()
+	err := codec.validate()
 	if err != nil {
 		return err
 	}
@@ -390,7 +415,7 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 	if tok != piulex.TokXref {
 		return 0, errExpectedXref
 	}
-	for len(pdf.sections) < codec.MaxLazySections {
+	for len(pdf.sections) < codec.maxLazySections {
 		tok, _, lit := lx.NextToken()
 		switch tok {
 		case piulex.TokTrailer:
@@ -574,7 +599,7 @@ func (pdf *PDF) appendStreamSections(r io.ReaderAt, codec *Codec, dictV Value, p
 }
 
 func (pdf *PDF) appendSection(codec *Codec, s xrefSection) error {
-	if len(pdf.sections) >= codec.MaxLazySections {
+	if len(pdf.sections) >= codec.maxLazySections {
 		return ErrCodecMemLimit
 	}
 	pdf.sections = append(pdf.sections, s)
