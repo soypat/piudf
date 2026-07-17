@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/soypat/piudf/ppdf"
-	"github.com/soypat/piudf/ppdf/piulex"
+	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf/piulex"
 )
 
 // maxPageDepth bounds the page tree walk. The tree is a tree only by

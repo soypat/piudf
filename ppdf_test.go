@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/piulex"
 )
 
 // countingReaderAt records the reads a Decode issues. Read count is the

@@ -4,7 +4,7 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/piulex"
 )
 
 // ObjectID identifies an indirect PDF object by number and generation.
@@ -17,7 +17,7 @@ type ObjectID struct {
 // object reference in PDF (object numbers start at 1).
 func (id ObjectID) IsZero() bool { return id.Num == 0 && id.Gen == 0 }
 
-// String returns the reference in PDF notation, i.e. "12 0 R".
+// AppendString appends the reference in PDF notation, i.e. "12 0 R".
 func (id ObjectID) AppendString(dst []byte) []byte {
 	dst = strconv.AppendUint(dst, uint64(id.Num), 10)
 	dst = append(dst, ' ')

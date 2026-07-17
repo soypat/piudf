@@ -6,7 +6,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/soypat/piudf/ppdf/internal"
+	"github.com/soypat/piudf/internal"
 )
 
 var ErrMemoryLimit = errors.New("piulex: mem limit exceed")

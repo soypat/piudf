@@ -3,8 +3,8 @@ package ppdf
 import (
 	"io"
 
-	"github.com/soypat/piudf/ppdf/internal"
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/internal"
+	"github.com/soypat/piudf/piulex"
 )
 
 // Resolve returns the value of indirect object id. Composite values come back

@@ -16,7 +16,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/soypat/piudf"
+	piudf "github.com/soypat/piudf/internal/piulegacy"
 )
 
 func main() {

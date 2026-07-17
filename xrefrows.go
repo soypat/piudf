@@ -3,7 +3,7 @@ package ppdf
 import (
 	"io"
 
-	"github.com/soypat/piudf/ppdf/internal"
+	"github.com/soypat/piudf/internal"
 )
 
 // maxXrefRowLen bounds one decoded row. readWidths caps each of the three /W

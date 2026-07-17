@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/piulex"
 )
 
 //go:generate go tool stringer -type=genericErr -linecomment -output=stringers.go

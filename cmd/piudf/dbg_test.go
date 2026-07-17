@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/soypat/piudf/ppdf"
+	ppdf "github.com/soypat/piudf"
 )
 
 func openCtx(t *testing.T, path string) *ctx {

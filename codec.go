@@ -4,7 +4,7 @@ import (
 	"io"
 	"math"
 
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/piulex"
 )
 
 const (

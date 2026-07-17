@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/piulex"
 )
 
 // pdfHeader opens a fresh document: the version marker and the conventional
@@ -44,6 +44,13 @@ type Encoder struct {
 	// payload is the offset the open stream payload began at; negative when
 	// no payload is open.
 	payload int64
+
+	// What Close wrote, kept for Finalize: the same coordinates a Decode of
+	// the output would record for the new revision.
+	secs       []xrefSection
+	xrefOff    int64
+	trailerOff int64
+	closed     bool
 }
 
 // Reset starts a fresh document on w, emitting the PDF header. buf is the
@@ -54,6 +61,8 @@ func (e *Encoder) Reset(w io.Writer, buf []byte) error {
 		return err
 	}
 	e.entries = e.entries[:0]
+	e.secs = e.secs[:0]
+	e.closed = false
 	e.nextNum = 1
 	e.prevXref = -1
 	e.cur = ObjectID{}
@@ -90,6 +99,8 @@ func (e *Encoder) ResetAppend(w io.Writer, buf []byte, r io.ReaderAt, size int64
 		return err
 	}
 	e.entries = e.entries[:0]
+	e.secs = e.secs[:0]
+	e.closed = false
 	e.cur = ObjectID{}
 	e.payload = -1
 	e.prevXref = base.Revision(0).XrefOffset
@@ -324,6 +335,13 @@ func (e *Encoder) Close(root, info ObjectID) error {
 		e.Int(num(i))
 		e.Int(int64(j - i + 1))
 		e.EOL()
+		// Recorded exactly as decodeXrefTable would: object range plus the
+		// offset of the first fixed-width record.
+		e.secs = append(e.secs, xrefSection{
+			firstObj: uint32(num(i)),
+			count:    uint32(j - i + 1),
+			fileOff:  e.Pos(),
+		})
 		for k := i; k <= j; k++ {
 			var rec [classicRecLen]byte
 			if k < 0 {
@@ -343,6 +361,7 @@ func (e *Encoder) Close(root, info ObjectID) error {
 	}
 	e.Ident("trailer")
 	e.EOL()
+	e.trailerOff = e.Pos()
 	e.DictOpen()
 	e.Name("Size")
 	e.Int(size)
@@ -364,7 +383,44 @@ func (e *Encoder) Close(root, info ObjectID) error {
 	e.EOL()
 	e.Raw([]byte("%%EOF"))
 	e.EOL()
-	return e.Flush()
+	err := e.Flush()
+	e.xrefOff = xrefOff
+	e.closed = err == nil
+	return err
+}
+
+// Finalize prepends the revision Close wrote to pdf's index, so pdf describes
+// the OUTPUT document without re-decoding it. That is only coherent because
+// the output begins with the base's bytes verbatim: every coordinate pdf
+// already holds stays true, and the new revision merely goes in front, which
+// is the newest-first order both the revision list and section lookup use.
+// After Finalize, read pdf against the output's reader, not the source's.
+//
+// It is one-shot per Close: a second call would prepend the revision twice.
+// For a fresh document it works too, turning an empty PDF into the index of
+// what was just written.
+func (e *Encoder) Finalize(pdf *PDF) error {
+	if !e.closed {
+		return errEncoderState
+	}
+	e.closed = false
+	n := len(e.secs)
+	oldSecs := len(pdf.sections)
+	pdf.sections = append(pdf.sections, e.secs...) // Grow; order fixed below.
+	copy(pdf.sections[n:], pdf.sections[:oldSecs])
+	copy(pdf.sections[:n], e.secs)
+	oldRevs := len(pdf.revs)
+	pdf.revs = append(pdf.revs, Revision{})
+	copy(pdf.revs[1:], pdf.revs[:oldRevs])
+	for i := 1; i < len(pdf.revs); i++ {
+		pdf.revs[i].FirstSection += n
+	}
+	pdf.revs[0] = Revision{
+		trailerOff: e.trailerOff,
+		XrefOffset: e.xrefOff,
+		Classic:    true,
+	}
+	return nil
 }
 
 // classicRecord formats one 20-byte 7.5.4 record: 10-digit offset, 5-digit

@@ -6,8 +6,8 @@ import (
 	"io"
 	"unicode/utf16"
 
-	"github.com/soypat/piudf/ppdf"
-	"github.com/soypat/piudf/ppdf/piulex"
+	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf/piulex"
 )
 
 // font decodes the codes of one PDF font back into text. A show operator's

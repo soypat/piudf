@@ -3,8 +3,8 @@ package ppdf
 import (
 	"io"
 
-	"github.com/soypat/piudf/ppdf/internal"
-	"github.com/soypat/piudf/ppdf/piulex"
+	"github.com/soypat/piudf/internal"
+	"github.com/soypat/piudf/piulex"
 )
 
 // objStm is the object stream a Codec currently reads through. Its data is an
