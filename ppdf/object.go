@@ -23,18 +23,18 @@ func (pdf *PDF) Resolve(r io.ReaderAt, id ObjectID, codec *Codec) (Value, error)
 }
 
 func (pdf *PDF) resolve(r io.ReaderAt, id ObjectID, codec *Codec) (Value, error) {
-	rec, err := pdf.lookupXref(r, id.Num, codec)
+	e, err := pdf.lookupXref(r, id.Num, codec)
 	if err != nil {
 		return Value{}, err
 	}
-	switch rec.kind {
-	case recordFree:
+	switch e.Kind {
+	case XrefFree:
 		return Value{Tok: piulex.TokNull}, nil
-	case recordCompressed:
-		// TODO: object rec.stream is an object stream; needs the stream cache.
+	case XrefCompressed:
+		// TODO: object e.Stream is an object stream; needs the stream cache.
 		return Value{}, errTODO
 	}
-	return codec.decodeObjectAt(r, rec.offset, id)
+	return codec.decodeObjectAt(r, e.Offset, id)
 }
 
 // Deref resolves v when it is an indirect reference and returns it unchanged

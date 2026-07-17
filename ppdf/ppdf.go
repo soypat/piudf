@@ -174,12 +174,22 @@ type xrefSection struct {
 	isXrefStream bool
 }
 
-// xrefRecord is a single decoded cross-reference entry.
-type xrefRecord struct {
-	offset int64 // recNormal: absolute object offset. recCompressed: index in stream.
-	stream uint32
-	gen    uint16
-	kind   recordKind
+// XrefEntry is the decoded cross-reference record of one object: where the
+// object is, as the newest revision mentioning it says. It is a result, never
+// state — nothing here stores one, which is what separates it from
+// [xrefSection]: O(objects) of these is the whole index in memory, while
+// O(subsections) of those is 144 bytes.
+type XrefEntry struct {
+	// Offset is the file offset of the object's "N G obj" header when Kind is
+	// XrefNormal, or the object's index within Stream when XrefCompressed.
+	// One field, because Kind says which it is and the two never coexist.
+	Offset int64
+	// Stream is the object stream holding the object, when XrefCompressed.
+	Stream uint32
+	// ID is the object number looked up, with the generation recorded for it.
+	ID ObjectID
+	// Kind discriminates the fields above.
+	Kind XrefKind
 }
 
 // streamCodec is the decoded /W, /Filter and /DecodeParms of an internal
@@ -205,13 +215,31 @@ func (sc streamCodec) rowLen() int64 {
 	return int64(sc.w[0]) + int64(sc.w[1]) + int64(sc.w[2])
 }
 
-type recordKind uint8
+// XrefKind is what a cross-reference record says about an object. The values
+// are the keywords a classic table spells them with.
+type XrefKind uint8
 
 const (
-	recordFree       = 'f'
-	recordCompressed = 'c'
-	recordNormal     = 'n'
+	// XrefFree is an object not present in the file. A reference to one is a
+	// reference to null (ISO 32000-1 7.3.10).
+	XrefFree XrefKind = 'f'
+	// XrefCompressed is an object inside an object stream.
+	XrefCompressed XrefKind = 'c'
+	// XrefNormal is an object at a file offset of its own.
+	XrefNormal XrefKind = 'n'
 )
+
+func (k XrefKind) String() string {
+	switch k {
+	case XrefFree:
+		return "free"
+	case XrefCompressed:
+		return "compressed"
+	case XrefNormal:
+		return "normal"
+	}
+	return "invalid"
+}
 
 // Revision is one step of the cross-reference chain as recorded by Decode.
 // Revisions are ordered newest first: index 0 is the revision startxref
@@ -551,47 +579,70 @@ func (pdf *PDF) appendSection(codec *Codec, s xrefSection) error {
 	return nil
 }
 
-func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {
-	rec := p.recbuf[:classicRecLen]
+// Lookup returns the newest cross-reference record for object num. Unlike
+// [PDF.Resolve] it does not touch the object itself, and it reports a free
+// entry rather than failing on one.
+func (pdf *PDF) Lookup(r io.ReaderAt, num uint32, codec *Codec) (XrefEntry, error) {
+	e, err := pdf.lookupXref(r, num, codec)
+	if err != nil {
+		return XrefEntry{}, pdf.setError(codec, err)
+	}
+	return e, nil
+}
+
+func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (XrefEntry, error) {
 	for i := range p.sections {
 		s := &p.sections[i]
 		if num < s.firstObj || num >= s.firstObj+s.count {
 			continue
 		}
-		if s.isXrefStream {
-			rowlen := s.codec.rowLen()
-			// A row index within the decoded payload, not a byte offset into
-			// the file: subsections of one stream share a payload and index
-			// it cumulatively from rowFirst.
-			off := rowlen * (int64(s.rowFirst) + int64(num-s.firstObj))
-			// TODO: rows is the payload at [s.fileOff, +s.length) decoded per
-			// s.codec. Reaching this row means decoding every row before it —
-			// flate has no random access and PNG predictors chain row to row —
-			// so the Codec has to inflate and cache it, one stream at a time.
-			var rows []byte
-			if len(rows) == 0 {
-				return xrefRecord{}, errTODO
-			}
-			if off < 0 || off+rowlen > int64(len(rows)) {
-				return xrefRecord{}, errXrefStreamBad // TODO fmt.Errorf("%w: xref stream row outside decoded data", ErrCorrupt)
-			}
-			return parseStreamRecord(rows[off:off+rowlen], s.codec.w)
-		}
-		recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
-		_, err := readAtFull(r, rec, recOff)
+		e, err := p.sectionEntry(r, s, num)
 		if err != nil {
-			return xrefRecord{}, err // TODO fmt.Errorf("piudf: reading xref record %d/%d at %#x: %w", n, len(rec), recOff, err)
+			return XrefEntry{}, err
 		}
-		return parseClassicRecord(rec, recOff)
+		// The sections know rows, not object numbers; only the caller's num
+		// completes the entry.
+		e.ID.Num = num
+		return e, nil
 	}
-	return xrefRecord{}, errObjectNotFound
+	return XrefEntry{}, errObjectNotFound
+}
+
+// sectionEntry reads object num's record out of section s, whichever form it
+// takes.
+func (p *PDF) sectionEntry(r io.ReaderAt, s *xrefSection, num uint32) (XrefEntry, error) {
+	if s.isXrefStream {
+		rowlen := s.codec.rowLen()
+		// A row index within the decoded payload, not a byte offset into
+		// the file: subsections of one stream share a payload and index
+		// it cumulatively from rowFirst.
+		off := rowlen * (int64(s.rowFirst) + int64(num-s.firstObj))
+		// TODO: rows is the payload at [s.fileOff, +s.length) decoded per
+		// s.codec. Reaching this row means decoding every row before it —
+		// flate has no random access and PNG predictors chain row to row —
+		// so the Codec has to inflate and cache it, one stream at a time.
+		var rows []byte
+		if len(rows) == 0 {
+			return XrefEntry{}, errTODO
+		}
+		if off < 0 || off+rowlen > int64(len(rows)) {
+			return XrefEntry{}, errXrefStreamBad
+		}
+		return parseStreamRecord(rows[off:off+rowlen], s.codec.w)
+	}
+	rec := p.recbuf[:classicRecLen]
+	recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
+	if _, err := readAtFull(r, rec, recOff); err != nil {
+		return XrefEntry{}, err
+	}
+	return parseClassicRecord(rec)
 }
 
 // parseStreamRecord decodes one row of a cross-reference stream: up to
 // three big-endian fields of the widths declared by /W. A zero-width type
 // field defaults to type 1 (ISO 32000-1 7.5.8.3); unknown types read as
 // free, which the spec equates with references to the null object.
-func parseStreamRecord(rec []byte, w [3]uint8) (xrefRecord, error) {
+func parseStreamRecord(rec []byte, w [3]uint8) (XrefEntry, error) {
 	be := func(b []byte) int64 {
 		var v int64
 		for _, c := range b {
@@ -609,33 +660,33 @@ func parseStreamRecord(rec []byte, w [3]uint8) (xrefRecord, error) {
 	switch typ {
 	case 1:
 		if f3 < 0 || f3 > math.MaxUint16 {
-			return xrefRecord{}, errBadXrefStreamObjectHeader // TODO fmt.Errorf("%w: xref stream generation %d", ErrCorrupt, f3)
+			return XrefEntry{}, errBadXrefStreamObjectHeader
 		}
-		return xrefRecord{kind: recordNormal, offset: f2, gen: uint16(f3)}, nil
+		return XrefEntry{Kind: XrefNormal, Offset: f2, ID: ObjectID{Gen: uint16(f3)}}, nil
 	case 2:
 		if f2 <= 0 || f2 > math.MaxUint32 {
-			return xrefRecord{}, errBadXrefStreamObjectHeader // TODO fmt.Errorf("%w: xref stream object stream number %d", ErrCorrupt, f2)
+			return XrefEntry{}, errBadXrefStreamObjectHeader
 		}
-		return xrefRecord{kind: recordCompressed, stream: uint32(f2), offset: f3}, nil
+		// Offset is the index within the stream here; an object stream's
+		// members all carry generation 0 (ISO 32000-1 7.5.8.3).
+		return XrefEntry{Kind: XrefCompressed, Stream: uint32(f2), Offset: f3}, nil
 	}
-	return xrefRecord{kind: recordFree}, nil
+	return XrefEntry{Kind: XrefFree}, nil
 }
 
 // parseClassicRecord decodes a 20-byte "nnnnnnnnnn ggggg n" record.
-func parseClassicRecord(rec []byte, recOff int64) (xrefRecord, error) {
+func parseClassicRecord(rec []byte) (XrefEntry, error) {
 	off, ok1 := parseInt(rec[0:10])
 	gen, ok2 := parseInt(rec[11:16])
 	kw := rec[17]
 	if ok1 != nil || ok2 != nil {
-		return xrefRecord{}, errors.Join(ok1, ok2)
+		return XrefEntry{}, errors.Join(ok1, ok2)
 	}
-	r := xrefRecord{offset: off, gen: uint16(gen)}
+	e := XrefEntry{Offset: off, ID: ObjectID{Gen: uint16(gen)}, Kind: XrefNormal}
 	if kw == 'f' {
-		r.kind = recordFree
-	} else {
-		r.kind = recordNormal
+		e.Kind = XrefFree
 	}
-	return r, nil
+	return e, nil
 }
 
 func readAtFull(r io.ReaderAt, b []byte, off int64) (int, error) {
