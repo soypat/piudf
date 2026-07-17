@@ -28,6 +28,10 @@ const (
 	errTODO                          // PDF feature not implemented yet
 	errValueMismatch                 // value kind/type mismatch
 	errNameTooLong                   // name longer than implementation limit
+	errObjectNotFound                // object number outside every xref section
+	errObjectIDMismatch              // object header does not match its xref entry
+	errNotAStream                    // value is not a stream object
+	errStreamBadLength               // stream /Length missing or out of bounds
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error
@@ -41,6 +45,7 @@ const (
 	errBadSubsectionStart           // bad subsection start/entry
 	errExpectingSubsectionOrTrailer // unexpected token looking for subsections or trailer
 	errBadXrefStreamObjectHeader    // bad xref stream object header
+	errBadObjectHeader              // bad 'N G obj' object header
 	errUnexpectedEOF                // unexpected end of file
 )
 
@@ -54,6 +59,95 @@ type PDF struct {
 	sections []xrefSection
 	revs     []Revision
 	recbuf   [classicRecLen]byte
+
+	// Error information.
+	errd DecodeError
+}
+
+// DecodeError is the error of the last failed decode, decorated with where in
+// the file it was found. It is a field of PDF, not a value callers allocate:
+// setError fills it in place, so failing costs no allocation.
+type DecodeError struct {
+	// err is a non-genericErr cause, i.e. an io error out of ReadAt. Held so
+	// the file position still reaches the caller.
+	err  error
+	errG genericErr
+	// errPos is the file offset the error was found at; zero means unknown.
+	// Offset 0 is the header, whose errors are recorded at 1 instead — no
+	// error worth reporting sits before the first byte, so the ambiguity
+	// costs nothing and a flag is avoided.
+	errPos piulex.Pos
+}
+
+func (de *DecodeError) Error() string {
+	msg := "ppdf: "
+	switch {
+	case de.errG != 0:
+		msg += de.errG.String()
+	case de.err != nil:
+		msg += de.err.Error()
+	default:
+		return msg + "no error"
+	}
+	if de.errPos != 0 {
+		// Offsets are the currency of this package; an error without one
+		// sends the reader hunting through megabytes.
+		msg += " at offset 0x" + strconv.FormatInt(int64(de.errPos), 16)
+	}
+	return msg
+}
+
+// Unwrap exposes the cause so errors.Is matches the package's error
+// constants through the decoration.
+func (de *DecodeError) Unwrap() error {
+	if de.err != nil {
+		return de.err
+	}
+	return de.errG
+}
+
+// Position returns the file offset the error was found at, or zero when
+// unknown. For an error raised while lexing this is where the lexer stood,
+// which is at or just past the offending token.
+func (de *DecodeError) Position() piulex.Pos { return de.errPos }
+
+// Err returns the error of the last decode, or nil. The returned error stays
+// valid until the next failing call on pdf.
+func (p *PDF) Err() error {
+	if p.errd.errG == 0 && p.errd.err == nil {
+		return nil
+	}
+	return &p.errd
+}
+
+// setError records err against the file position codec's lexer stands at and
+// returns it decorated. err is optional: a nil err clears the recorded error
+// and returns nil, so a call site can route both outcomes through it. A nil
+// codec records the error without a position — before Decode has a lexer to
+// ask, there is none.
+//
+// The result aliases pdf's own storage: it is overwritten by the next
+// setError, and callers who need it to outlive that must copy it.
+func (pdf *PDF) setError(codec *Codec, err error) error {
+	pdf.errd = DecodeError{}
+	if err == nil {
+		return nil
+	}
+	if de, ok := err.(*DecodeError); ok {
+		// Already decorated by a nested call: keep the position it was found
+		// at rather than the one the lexer has since moved to.
+		pdf.errd = *de
+		return &pdf.errd
+	}
+	if g, ok := err.(genericErr); ok {
+		pdf.errd.errG = g
+	} else {
+		pdf.errd.err = err
+	}
+	if codec != nil {
+		pdf.errd.errPos = max(1, codec.lex.Pos())
+	}
+	return &pdf.errd
 }
 
 // xrefSection describes one cross-reference subsection as coordinates only;
@@ -75,22 +169,9 @@ type xrefSection struct {
 	// Subsections of one stream share a payload and index it cumulatively,
 	// so this is a row number and not any kind of offset.
 	rowFirst uint32
-	w        [3]uint8    // Field widths; classic is {10, 5, 1}, streams use /W.
 	codec    streamCodec // isXrefStream: how to decode the payload.
 
 	isXrefStream bool
-}
-
-// streamCodec is the decoded /Filter and /DecodeParms of an internal (xref
-// or object) stream. Only FlateDecode, optionally behind a predictor, is
-// valid on one. The zero value decodes nothing; see readCodec for the
-// defaults the format mandates.
-type streamCodec struct {
-	columns   uint16
-	predictor uint8
-	colors    uint8
-	bpc       uint8
-	flate     bool
 }
 
 // xrefRecord is a single decoded cross-reference entry.
@@ -99,6 +180,29 @@ type xrefRecord struct {
 	stream uint32
 	gen    uint16
 	kind   recordKind
+}
+
+// streamCodec is the decoded /W, /Filter and /DecodeParms of an internal
+// (xref or object) stream: everything needed to turn its payload back into
+// rows. Only FlateDecode, optionally behind a predictor, is valid on one. The
+// zero value decodes nothing; see readCodec for the defaults the format
+// mandates.
+type streamCodec struct {
+	// w is /W, the row layout: three big-endian field widths. It is a decode
+	// parameter like the ones below, and a classic table has no equivalent —
+	// its 10/5/1 record shape is fixed by ISO 32000-1 7.5.4 and lives in
+	// parseClassicRecord, not in any field.
+	w         [3]uint8
+	columns   uint16
+	predictor uint8
+	colors    uint8
+	bpc       uint8
+	flate     bool
+}
+
+// rowLen returns the byte length of one decoded row.
+func (sc streamCodec) rowLen() int64 {
+	return int64(sc.w[0]) + int64(sc.w[1]) + int64(sc.w[2])
 }
 
 type recordKind uint8
@@ -168,7 +272,19 @@ func (pdf *PDF) Reset() {
 	pdf.revs = pdf.revs[:0]
 }
 
+// Decode walks the cross-reference chain of the document r, recording where
+// every object can later be found. No object is decoded and no file bytes are
+// retained; see [PDF.SizeOnRAM] for what is.
+//
+// On failure the returned error carries the file offset it was found at, and
+// [PDF.Err] returns it again until the next decode.
 func (pdf *PDF) Decode(r io.ReaderAt, size int64, codec *Codec) error {
+	// One funnel: nothing lexes while an error unwinds, so the lexer still
+	// stands where it failed and every return below decorates identically.
+	return pdf.setError(codec, pdf.decode(r, size, codec))
+}
+
+func (pdf *PDF) decode(r io.ReaderAt, size int64, codec *Codec) error {
 	err := codec.Validate()
 	if err != nil {
 		return err
@@ -274,7 +390,6 @@ func (pdf *PDF) decodeXrefTable(r io.ReaderAt, off int64, codec *Codec) (prev in
 					firstObj:     uint32(first),
 					count:        uint32(count),
 					fileOff:      recOff,
-					w:            [3]uint8{10, 5, 1},
 					isXrefStream: false,
 				}
 				pdf.sections = append(pdf.sections, sec)
@@ -330,11 +445,13 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	} else if size.I <= 0 || size.I > math.MaxUint32 || length.I < 0 {
 		return 0, errXrefStreamBad
 	}
-	w, err := codec.readWidths(r, wV)
+	sc, err := codec.readCodec(r, dictV)
 	if err != nil {
 		return 0, err
 	}
-	sc, err := codec.readCodec(r, dictV)
+	// /W is read into sc separately: readCodec serves object streams too, and
+	// only a cross-reference stream has a row layout.
+	sc.w, err = codec.readWidths(r, wV)
 	if err != nil {
 		return 0, err
 	}
@@ -343,7 +460,6 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	proto := xrefSection{
 		fileOff:      int64(dataStart),
 		length:       length.I,
-		w:            w,
 		codec:        sc,
 		isXrefStream: true,
 	}
@@ -443,7 +559,7 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, e
 			continue
 		}
 		if s.isXrefStream {
-			rowlen := int64(s.w[0]) + int64(s.w[1]) + int64(s.w[2])
+			rowlen := s.codec.rowLen()
 			// A row index within the decoded payload, not a byte offset into
 			// the file: subsections of one stream share a payload and index
 			// it cumulatively from rowFirst.
@@ -459,7 +575,7 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, e
 			if off < 0 || off+rowlen > int64(len(rows)) {
 				return xrefRecord{}, errXrefStreamBad // TODO fmt.Errorf("%w: xref stream row outside decoded data", ErrCorrupt)
 			}
-			return parseStreamRecord(rows[off:off+rowlen], s.w)
+			return parseStreamRecord(rows[off:off+rowlen], s.codec.w)
 		}
 		recOff := s.fileOff + classicRecLen*int64(num-s.firstObj)
 		_, err := readAtFull(r, rec, recOff)
@@ -468,7 +584,7 @@ func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, e
 		}
 		return parseClassicRecord(rec, recOff)
 	}
-	return xrefRecord{}, errors.New("object not found")
+	return xrefRecord{}, errObjectNotFound
 }
 
 // parseStreamRecord decodes one row of a cross-reference stream: up to

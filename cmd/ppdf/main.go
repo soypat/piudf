@@ -52,6 +52,7 @@ func init() {
 		"trailer":   {cmdTrailer, "", "print the newest trailer dictionary"},
 		"revisions": {cmdRevisions, "", "incremental-update history, newest first"},
 		"lex":       {cmdLex, "<off> [-n tokens]", "token stream from any file offset"},
+		"pagetext":  {cmdPageText, "<page>", "text of one page, in content-stream order"},
 	}
 }
 

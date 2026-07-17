@@ -167,7 +167,7 @@ func TestDecodeXrefStream(t *testing.T) {
 		if s.length <= 0 || s.fileOff <= 0 || s.fileOff+s.length > size {
 			t.Errorf("section %d payload [%d,+%d) outside a %d byte file", i, s.fileOff, s.length, size)
 		}
-		if s.w[1] == 0 {
+		if s.codec.w[1] == 0 {
 			t.Errorf("section %d has zero /W offset width", i)
 		}
 		if !s.codec.flate {
