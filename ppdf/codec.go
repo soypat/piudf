@@ -44,7 +44,6 @@ type Codec struct {
 	maxLazySections int
 	maxDepth        int
 	auxcounter      int
-	auxkey          string
 }
 
 // MinBufferSize is the smallest [DecoderConfig.Buffer] a Codec accepts. The
@@ -109,6 +108,12 @@ func (c *Codec) Configure(cfg DecoderConfig) error {
 	c.buf = cfg.Buffer
 	c.maxLazySections = cfg.MaxLazySections
 	c.maxDepth = cfg.MaxDepth
+	// Literals are consumed before the next token is lexed, so one reused
+	// buffer serves them all. This is configuration, so it is set here rather
+	// than by Decode: a Codec must lex the same way before a document is
+	// indexed as after.
+	c.lex.ReuseLiteralBuffer = true
+	c.lex.MaxLiteral = len(cfg.Buffer)
 	// The cursor holds the cache rather than the Codec: it is the only thing
 	// that fills it, and it alone knows when what it holds stops being true.
 	c.rows.setCache(cfg.XrefCache)
@@ -161,11 +166,19 @@ func (codec *Codec) ArrayForEach(pdf *PDF, r io.ReaderAt, arrVal Value, push fun
 	}
 }
 
+// DictGet returns the value for key in dictionary (or stream dictionary)
+// dictVal, or a null Value when the key is absent. Cost is one scan of the
+// dictionary's span, so reading n keys costs n scans; [Codec.DictForEach] reads
+// them all in one.
 func (d *Codec) DictGet(pdf *PDF, r io.ReaderAt, dictVal Value, key string) (ret Value, err error) {
 	ret = Value{Tok: piulex.TokNull}
-	d.auxkey = key
+	// key is captured rather than parked on the Codec. A field would be one
+	// Codec-wide slot for a value this call needs across the walk, and the walk
+	// can re-enter DictGet: reading a span inside an object stream loads that
+	// stream, which reads its /N and /First. The inner call would leave its key
+	// in the slot and this one would go looking for /First.
 	err = d.DictForEach(pdf, r, dictVal, func(bkey []byte, v Value) bool {
-		if bequal(bkey, d.auxkey) {
+		if bequal(bkey, key) {
 			ret = v
 			return false
 		}
@@ -230,6 +243,44 @@ func (d *Codec) dictPrev(pdf *PDF, r io.ReaderAt, dictV Value) (prev int64, err 
 		return 0, nil
 	}
 	return prev, nil
+}
+
+// AppendString appends the text of string, hex string or name v to dst.
+//
+// The text is the value's, decoded: escape sequences of a literal string, the
+// digit pairs of a hex string and the #xx of a name all resolve, and a name's
+// leading slash is punctuation rather than text and is left out. Which of the
+// three v is does not change the result's meaning — PDF spells the same bytes
+// three ways.
+//
+// The span is re-read rather than remembered. A Value is a coordinate and this
+// package holds no file bytes, so this is the seam where text leaves it and
+// dst is who owns it. Callers that only need to know whether a name matches
+// should use [Codec.NameIs], which compares without copying.
+//
+// It lexes, so it must not be called from inside an [Codec.ArrayForEach] or
+// [Codec.DictForEach] callback: one Codec has one lexer, and moving it mid-walk
+// loses the caller's place. Collect the Values, then decode them.
+func (d *Codec) AppendString(dst []byte, pdf *PDF, r io.ReaderAt, v Value) ([]byte, error) {
+	switch v.Tok {
+	case piulex.TokString, piulex.TokHexString, piulex.TokName:
+	default:
+		return dst, errValueMismatch
+	}
+	if err := d.lexValueSpan(pdf, r, v); err != nil {
+		return dst, err
+	}
+	tok, _, lit := d.lex.NextToken()
+	if tok != v.Tok {
+		// The span does not lex as what v says it is, so the coordinate and
+		// the file disagree — or the literal outran MaxLiteral, which the
+		// lexer reports rather than truncate.
+		if err := d.lex.Err(); err != nil {
+			return dst, err
+		}
+		return dst, errValueMismatch
+	}
+	return append(dst, lit...), nil
 }
 
 // NameIs reports whether name span v is the PDF name s.

@@ -1,6 +1,7 @@
 package ppdf
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"strings"
@@ -366,5 +367,488 @@ func TestLookupAllocs(t *testing.T) {
 	})
 	if allocs > 0 {
 		t.Errorf("Lookup allocates %.1f times per call", allocs)
+	}
+}
+
+// TestAppendString covers the three spellings PDF gives the same text, and the
+// escapes each one hides. Reading a span raw and stripping the delimiters —
+// which is what a caller without this does — gets every one of these wrong.
+func TestAppendString(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		tok  piulex.Token
+		want string
+	}{
+		{"plain name", `/Type`, piulex.TokName, "Type"},
+		{"name with hex escape", `/Adobe#20Green`, piulex.TokName, "Adobe Green"},
+		{"name with escaped slash", `/A#2FB`, piulex.TokName, "A/B"},
+		{"plain string", `(hello)`, piulex.TokString, "hello"},
+		{"string with escapes", `(a\(b\)c\\d)`, piulex.TokString, `a(b)c\d`},
+		{"string with newline escape", `(line\nnext)`, piulex.TokString, "line\nnext"},
+		{"string with octal", `(\101\102)`, piulex.TokString, "AB"},
+		{"nested parens", `(a (b) c)`, piulex.TokString, "a (b) c"},
+		{"hex string", `<48656C6C6F>`, piulex.TokHexString, "Hello"},
+		{"hex odd digit", `<48656C6C6F7>`, piulex.TokHexString, "Hellop"}, // Trailing digit pads with 0.
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodec(make([]byte, 4096))
+			v := Value{Tok: tc.tok, I: 0}
+			got, err := c.AppendString(nil, nil, strings.NewReader(tc.src), v)
+			if err != nil {
+				t.Fatalf("AppendString(%s): %v", tc.src, err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("AppendString(%s) = %q, want %q", tc.src, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAppendStringAppends pins the append contract: dst is the caller's and is
+// added to, not replaced.
+func TestAppendStringAppends(t *testing.T) {
+	c := newCodec(make([]byte, 4096))
+	dst := []byte("prefix:")
+	dst, err := c.AppendString(dst, nil, strings.NewReader(`/Name`), Value{Tok: piulex.TokName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(dst) != "prefix:Name" {
+		t.Errorf("got %q, want %q", dst, "prefix:Name")
+	}
+}
+
+// TestAppendStringMismatch pins the refusal: a Value that is not text has no
+// text, and saying so beats returning the bytes that happen to sit there.
+func TestAppendStringMismatch(t *testing.T) {
+	c := newCodec(make([]byte, 4096))
+	for _, v := range []Value{
+		{Tok: piulex.TokInt, I: 42},
+		{Tok: tokDict, I: 0},
+		{Tok: piulex.TokR, N: 1},
+	} {
+		if _, err := c.AppendString(nil, nil, strings.NewReader(`(text)`), v); err != errValueMismatch {
+			t.Errorf("AppendString of %v = %v, want errValueMismatch", v.Tok, err)
+		}
+	}
+}
+
+// TestValueDurability pins the file-coordinate model against the one thing
+// that could break it. A Value is coordinates and a PDF is an index, so
+// neither goes stale — but a Codec is not stateless: its lexer window and its
+// two cursors hold bytes of whatever document was read last, and they tell
+// documents apart by comparing io.ReaderAt identity. Get that comparison wrong
+// and document A is answered with document B's bytes, which is a wrong answer
+// rather than an error.
+//
+// The two files are chosen to land on opposite paths: sto.pdf is a classic
+// table read a record at a time, rp2350 is a cross-reference stream read
+// through the row cursor with a catalog inside an object stream. Reading
+// either moves every cursor the other one uses.
+func TestValueDurability(t *testing.T) {
+	rA, sizeA := openCounted(t, "../testdata/sto.pdf")
+	rB, sizeB := openCounted(t, "../testdata/rp2350-datasheet.pdf")
+	codec := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
+
+	// One Codec, two documents. The Codec is the scratch both share; the
+	// indexes are separate and must stay so.
+	var pA, pB PDF
+	if err := pA.Decode(rA, sizeA, codec); err != nil {
+		t.Fatalf("Decode A: %v", err)
+	}
+	catA := mustCatalog(t, &pA, rA, codec)
+	sizeValA := mustTrailerSize(t, &pA, rA, codec)
+	lookA, err := pA.Lookup(rA, catA.num, codec)
+	if err != nil {
+		t.Fatalf("Lookup A: %v", err)
+	}
+
+	if err := pB.Decode(rB, sizeB, codec); err != nil {
+		t.Fatalf("Decode B: %v", err)
+	}
+	catB := mustCatalog(t, &pB, rB, codec)
+	sizeValB := mustTrailerSize(t, &pB, rB, codec)
+	if sizeValA == sizeValB {
+		t.Fatal("the two documents have the same /Size; this test proves nothing")
+	}
+	// Resolving B's page tree puts the object stream cursor on B, which is the
+	// state most likely to be mistaken for A's.
+	pagesB, err := pB.Deref(rB, mustGet(t, &pB, rB, codec, catB.v, "Pages"), codec)
+	if err != nil {
+		t.Fatalf("B /Pages: %v", err)
+	}
+	if pagesB.Stm == 0 {
+		t.Fatal("B's page tree is not in an object stream; this test proves less than it should")
+	}
+
+	// A's Values were made before B existed and are read after B moved every
+	// cursor. Same answers, or the coordinates mean nothing.
+	if got := mustType(t, &pA, rA, codec, catA.v); got != "Catalog" {
+		t.Errorf("A catalog /Type after reading B = %q, want %q", got, "Catalog")
+	}
+	if got := mustTrailerSize(t, &pA, rA, codec); got != sizeValA {
+		t.Errorf("A /Size after reading B = %d, want %d", got, sizeValA)
+	}
+	if got, err := pA.Lookup(rA, catA.num, codec); err != nil || got != lookA {
+		t.Errorf("A xref entry after reading B = %+v (%v), want %+v", got, err, lookA)
+	}
+
+	// Interleaved, which is what a caller reading two documents actually does.
+	// Once each would not catch a cursor that only goes wrong on the way back.
+	for i := range 3 {
+		if got := mustType(t, &pA, rA, codec, catA.v); got != "Catalog" {
+			t.Fatalf("round %d: A /Type = %q", i, got)
+		}
+		if got := mustType(t, &pB, rB, codec, catB.v); got != "Catalog" {
+			t.Fatalf("round %d: B /Type = %q", i, got)
+		}
+		if got := mustTrailerSize(t, &pA, rA, codec); got != sizeValA {
+			t.Fatalf("round %d: A /Size = %d, want %d", i, got, sizeValA)
+		}
+		if got := mustTrailerSize(t, &pB, rB, codec); got != sizeValB {
+			t.Fatalf("round %d: B /Size = %d, want %d", i, got, sizeValB)
+		}
+	}
+
+	// The checks above only compare a hot Codec with itself, which a Codec
+	// confusing two documents can still be consistent about. So compare it
+	// against one that has read nothing else: a cold Codec cannot hold the
+	// wrong document's bytes, so it is the oracle for what B's objects are.
+	//
+	// The sample alternates object streams and revisits them, because a cursor
+	// serving a stale stream is only wrong on the way back to one it left.
+	cold := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
+	var pCold PDF
+	if err := pCold.Decode(rB, sizeB, cold); err != nil {
+		t.Fatalf("Decode cold: %v", err)
+	}
+	nums := [...]uint32{1, 5000, 2, 12000, 5000, 300, 12000, 1, 300}
+	for _, num := range nums {
+		want, errCold := pCold.Resolve(rB, ObjectID{Num: num}, cold)
+		// The hot Codec reads A in between, so every cursor it owns is on the
+		// wrong document when B asks.
+		mustTrailerSize(t, &pA, rA, codec)
+		got, errHot := pB.Resolve(rB, ObjectID{Num: num}, codec)
+		if (errCold == nil) != (errHot == nil) {
+			t.Fatalf("object %d: cold %v, hot %v", num, errCold, errHot)
+		}
+		if errCold != nil {
+			continue
+		}
+		if got != want {
+			t.Errorf("object %d: hot Codec says %+v, cold Codec says %+v", num, got, want)
+		}
+		// A Value only names bytes, so agreeing on the name is not agreeing on
+		// what is there. Read through it: a stale window answers with bytes
+		// that are someone else's but still lex.
+		if !got.IsDict() {
+			continue
+		}
+		gotT, err1 := codec.DictGet(&pB, rB, got, "Type")
+		wantT, err2 := cold.DictGet(&pCold, rB, want, "Type")
+		if err1 != nil || err2 != nil || gotT.IsNull() || wantT.IsNull() {
+			continue // Not every dictionary carries a /Type.
+		}
+		gotS, err1 := codec.AppendString(nil, &pB, rB, gotT)
+		wantS, err2 := cold.AppendString(nil, &pCold, rB, wantT)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("object %d /Type text: hot %v, cold %v", num, err1, err2)
+		}
+		if !bytes.Equal(gotS, wantS) {
+			t.Errorf("object %d /Type: hot Codec reads %q, cold Codec reads %q", num, gotS, wantS)
+		}
+	}
+
+	// Switching object streams back to back, with nothing in between. The
+	// checks above cannot see a cursor that serves a stale stream, because
+	// reading A between two B reads points the lexer at a different file and
+	// drops its window as a side effect — which hides the bug rather than
+	// tests it. Here nothing intervenes: every read lands on the same cursor
+	// the last one left somewhere else.
+	streamThrash(t, rB, sizeB, &pB, codec)
+
+	// Reusing A's index for another document keeps its capacity: Reset empties
+	// rather than releases, which is what makes a PDF reusable without
+	// allocating.
+	capBefore := cap(pA.sections)
+	if err := pA.Decode(rB, sizeB, codec); err != nil {
+		t.Fatalf("re-Decode A with B's file: %v", err)
+	}
+	if cap(pA.sections) != capBefore {
+		t.Errorf("sections cap changed on reuse: %d -> %d", capBefore, cap(pA.sections))
+	}
+	if got := mustTrailerSize(t, &pA, rB, codec); got != sizeValB {
+		t.Errorf("reused index reports /Size %d, want B's %d", got, sizeValB)
+	}
+}
+
+type catalog struct {
+	v   Value
+	num uint32
+}
+
+func mustCatalog(t *testing.T, p *PDF, r io.ReaderAt, codec *Codec) catalog {
+	t.Helper()
+	ref := mustGet(t, p, r, codec, p.Trailer(), "Root")
+	if ref.Tok != piulex.TokR {
+		t.Fatalf("/Root is %v, want a reference", ref.Tok)
+	}
+	v, err := p.Resolve(r, ref.ObjectID(), codec)
+	if err != nil {
+		t.Fatalf("resolving /Root: %v", err)
+	}
+	return catalog{v: v, num: ref.ObjectID().Num}
+}
+
+func mustGet(t *testing.T, p *PDF, r io.ReaderAt, codec *Codec, dict Value, key string) Value {
+	t.Helper()
+	v, err := codec.DictGet(p, r, dict, key)
+	if err != nil {
+		t.Fatalf("/%s: %v", key, err)
+	}
+	if v.IsNull() {
+		t.Fatalf("/%s: absent", key)
+	}
+	return v
+}
+
+func mustType(t *testing.T, p *PDF, r io.ReaderAt, codec *Codec, dict Value) string {
+	t.Helper()
+	got, err := codec.AppendString(nil, p, r, mustGet(t, p, r, codec, dict, "Type"))
+	if err != nil {
+		t.Fatalf("/Type: %v", err)
+	}
+	return string(got)
+}
+
+func mustTrailerSize(t *testing.T, p *PDF, r io.ReaderAt, codec *Codec) int64 {
+	t.Helper()
+	n, ok := mustGet(t, p, r, codec, p.Trailer(), "Size").Int()
+	if !ok {
+		t.Fatal("/Size is not an integer")
+	}
+	return n
+}
+
+// streamThrash resolves objects from several object streams in an order that
+// keeps returning to streams it has left, and checks each against an oracle
+// that cannot be stale: a Codec decoded fresh for that one object. A cursor
+// holding the wrong stream's bytes is not an error — the bytes still lex — so
+// only an independent reader says what is actually there.
+func streamThrash(t *testing.T, r io.ReaderAt, size int64, p *PDF, codec *Codec) {
+	t.Helper()
+	// Find one object in each of several distinct object streams. Objects in
+	// one stream share a decode; objects in different ones evict each other.
+	var nums []uint32
+	seen := map[uint32]bool{}
+	for num := uint32(1); num < 15888 && len(nums) < 4; num++ {
+		e, err := p.Lookup(r, num, codec)
+		if err != nil || e.Kind != XrefCompressed || seen[e.Stream] {
+			continue
+		}
+		seen[e.Stream] = true
+		nums = append(nums, num)
+	}
+	if len(nums) < 4 {
+		t.Fatalf("found objects in only %d object streams; this check needs several", len(nums))
+	}
+	// Revisit: a cursor is only wrong on the way back to a stream it left.
+	order := []int{0, 1, 0, 2, 1, 3, 2, 0, 3, 1}
+	for _, i := range order {
+		num := nums[i]
+		got, err := p.Resolve(r, ObjectID{Num: num}, codec)
+		if err != nil {
+			t.Fatalf("object %d: %v", num, err)
+		}
+		want := resolveFresh(t, r, size, num)
+		if got != want {
+			t.Fatalf("object %d after switching streams: %+v, want %+v", num, got, want)
+		}
+		// The Value names bytes; a stale stream is bytes that lex and lie.
+		if !got.IsDict() {
+			continue
+		}
+		gotS, err := dictText(codec, p, r, got, "Type")
+		if err != nil {
+			continue
+		}
+		freshCodec := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
+		var freshPDF PDF
+		if err := freshPDF.Decode(r, size, freshCodec); err != nil {
+			t.Fatal(err)
+		}
+		wantS, err := dictText(freshCodec, &freshPDF, r, want, "Type")
+		if err != nil {
+			t.Fatalf("object %d fresh /Type: %v", num, err)
+		}
+		if !bytes.Equal(gotS, wantS) {
+			t.Errorf("object %d /Type after switching streams: %q, want %q", num, gotS, wantS)
+		}
+	}
+}
+
+// resolveFresh resolves num through a Codec that has read nothing else, which
+// is the only reader guaranteed to hold no other document's bytes.
+func resolveFresh(t *testing.T, r io.ReaderAt, size int64, num uint32) Value {
+	t.Helper()
+	codec := newCodecCfg(DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 4096, MaxDepth: 32})
+	var p PDF
+	if err := p.Decode(r, size, codec); err != nil {
+		t.Fatal(err)
+	}
+	v, err := p.Resolve(r, ObjectID{Num: num}, codec)
+	if err != nil {
+		t.Fatalf("fresh resolve of object %d: %v", num, err)
+	}
+	return v
+}
+
+func dictText(codec *Codec, p *PDF, r io.ReaderAt, dict Value, key string) ([]byte, error) {
+	v, err := codec.DictGet(p, r, dict, key)
+	if err != nil {
+		return nil, err
+	}
+	if v.IsNull() {
+		return nil, errValueMismatch
+	}
+	return codec.AppendString(nil, p, r, v)
+}
+
+// pngFilter applies PNG row filter ft to row cur against the reconstructed row
+// above it, which is the transform unfilterPNG undoes. It is written from
+// RFC 2083 section 6 rather than in terms of the code under test — an encoder
+// that called paeth would round-trip a broken paeth happily.
+func pngFilter(cur, prev []byte, ft byte) []byte {
+	const bpp = 1
+	out := make([]byte, len(cur))
+	for i := range cur {
+		var a, c byte
+		if i >= bpp {
+			a = cur[i-bpp]
+			c = prev[i-bpp]
+		}
+		b := prev[i]
+		var pred byte
+		switch ft {
+		case 1:
+			pred = a
+		case 2:
+			pred = b
+		case 3:
+			pred = byte((int(a) + int(b)) / 2)
+		case 4:
+			// Paeth spelled out from the RFC: the neighbour closest to the
+			// linear estimate a+b-c wins, ties going a, then b.
+			p := int(a) + int(b) - int(c)
+			pa, pb, pc := abs(p-int(a)), abs(p-int(b)), abs(p-int(c))
+			switch {
+			case pa <= pb && pa <= pc:
+				pred = a
+			case pb <= pc:
+				pred = b
+			default:
+				pred = c
+			}
+		}
+		out[i] = cur[i] - pred
+	}
+	return out
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// rows is the sample table every case below reconstructs: values chosen to
+// wrap a byte under every filter, which is where an int-vs-byte slip shows.
+var predictorRows = [][]byte{
+	{10, 20, 30, 40, 50},
+	{15, 25, 200, 45, 55},
+	{0, 255, 128, 1, 254},
+	{7, 7, 7, 7, 7},
+}
+
+// TestUnfilterPNG covers every row filter. Only filter 2 occurs in the test
+// corpus — every cross-reference stream in testdata is written with /Predictor
+// 12 and Up rows — so without this the other four are code that has never run.
+func TestUnfilterPNG(t *testing.T) {
+	for ft := byte(0); ft <= 4; ft++ {
+		// The row above the first is all zeros (ISO 32000-1 7.4.4.4), which is
+		// what the cursor hands in and what the encoder must assume.
+		prev := make([]byte, len(predictorRows[0]))
+		for i, want := range predictorRows {
+			cur := pngFilter(want, prev, ft)
+			if err := unfilterPNG(cur, prev, ft); err != nil {
+				t.Fatalf("filter %d row %d: %v", ft, i, err)
+			}
+			if !bytes.Equal(cur, want) {
+				t.Fatalf("filter %d row %d: got % x, want % x", ft, i, cur, want)
+			}
+			// The reconstructed row is the next one's reference, which is the
+			// chaining that makes a row unreachable without its predecessors.
+			prev = cur
+		}
+	}
+}
+
+// TestUnfilterPNGMixedFilters pins the filter being per-row. /Predictor 12
+// declares that filters are present, not which: an encoder picks one per row,
+// so a decoder honouring only the declared value decodes most files wrong.
+func TestUnfilterPNGMixedFilters(t *testing.T) {
+	prev := make([]byte, len(predictorRows[0]))
+	for i, want := range predictorRows {
+		ft := byte(i % 5) // A different filter every row.
+		cur := pngFilter(want, prev, ft)
+		if err := unfilterPNG(cur, prev, ft); err != nil {
+			t.Fatalf("row %d (filter %d): %v", i, ft, err)
+		}
+		if !bytes.Equal(cur, want) {
+			t.Fatalf("row %d (filter %d): got % x, want % x", i, ft, cur, want)
+		}
+		prev = cur
+	}
+}
+
+// TestPaeth pins the predictor against RFC 2083 section 6.6 by known answer,
+// not by round trip: an encoder and decoder sharing one broken paeth agree
+// with each other and with nothing else.
+//
+// The rule is that the estimate p = a+b-c picks whichever neighbour it lands
+// nearest, ties going to a, then b. The implementation spells the distances
+// the RFC's way — |p-a| is b-c, |p-b| is a-c, |p-c| is a+b-2c — so each case
+// below states the three it turns on.
+func TestPaeth(t *testing.T) {
+	for _, tc := range []struct {
+		a, b, c, want byte
+		why           string
+	}{
+		{0, 0, 0, 0, "all zero"},
+		{10, 10, 10, 10, "all equal: every distance zero, a wins the tie"},
+		{10, 20, 30, 10, "p=0: pa=10 pb=20 pc=30, a nearest"},
+		{200, 100, 50, 200, "p=250: pa=50 pb=150 pc=200, a nearest"},
+		{1, 2, 3, 1, "p=0: pa=1 pb=2 pc=3, a nearest"},
+		{10, 5, 5, 10, "p=10: pa=0, a exact"},
+		{5, 10, 5, 10, "p=10: pa=5 pb=0 pc=5, b nearest"},
+		{100, 200, 150, 150, "p=150: pa=50 pb=50 pc=0, c nearest — the case a tie rule alone gets wrong"},
+		{255, 0, 0, 255, "p=255: pa=0, a exact, no byte wrap in the estimate"},
+		{0, 255, 255, 0, "p=0: pa=0, a exact"},
+		{0, 0, 255, 0, "p=-255: pa=255 pb=255 pc=510, negative estimate, a wins the tie"},
+	} {
+		if got := paeth(tc.a, tc.b, tc.c); got != tc.want {
+			t.Errorf("paeth(%d,%d,%d) = %d, want %d (%s)", tc.a, tc.b, tc.c, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestUnfilterPNGBadFilter pins an unknown filter being reported. The byte
+// comes from the file, so it is input, not a constant.
+func TestUnfilterPNGBadFilter(t *testing.T) {
+	cur, prev := []byte{1, 2, 3}, []byte{0, 0, 0}
+	if err := unfilterPNG(cur, prev, 5); err != errXrefStreamBad {
+		t.Errorf("filter 5 = %v, want errXrefStreamBad", err)
 	}
 }

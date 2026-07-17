@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"strings"
 	"unicode/utf16"
 
 	"github.com/soypat/piudf/ppdf"
@@ -155,7 +154,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 	// /Differences is a code followed by the names of the glyphs at that code
 	// onward, repeated: [0 /B /D 65 /a] assigns 0->B, 1->D, 65->a.
 	var code uint32
-	var names []string // Collected first; reading a name span re-lexes.
+	var names []ppdf.Value
 	var codes []uint32
 	err = c.codec.ArrayForEach(c.pdf, c.r, diff, func(v ppdf.Value) bool {
 		if n, ok := v.Int(); ok {
@@ -165,11 +164,9 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 		if v.Tok != piulex.TokName {
 			return true
 		}
-		b, err := readSpan(c, v)
-		if err != nil {
-			return false
-		}
-		names = append(names, strings.TrimPrefix(string(b), "/"))
+		// The names are collected, not read: reading one re-lexes, and the
+		// walk owns the lexer until it ends.
+		names = append(names, v)
 		codes = append(codes, code)
 		code++
 		return true
@@ -177,8 +174,12 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 	if err != nil {
 		return nil, err
 	}
-	for i, name := range names {
-		if r := glyphRune(name); r != 0 {
+	var name []byte
+	for i, nv := range names {
+		if name, err = c.codec.AppendString(name[:0], c.pdf, c.r, nv); err != nil {
+			return nil, err
+		}
+		if r := glyphRune(string(name)); r != 0 {
 			f.text[codes[i]] = string(r)
 		}
 	}

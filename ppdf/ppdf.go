@@ -345,10 +345,6 @@ func (pdf *PDF) decode(r io.ReaderAt, size int64, codec *Codec) error {
 		return err
 	}
 	buf := codec.buf
-	// Literals are consumed before the next token is lexed, so one reused
-	// buffer serves them all.
-	codec.lex.ReuseLiteralBuffer = true
-	codec.lex.MaxLiteral = len(buf)
 	pdf.Reset()
 	header := buf[:5]
 	n, err := readAtFull(r, header, 0)
