@@ -52,6 +52,16 @@ func (x *xrefRows) setCache(b []byte) {
 	x.cache, x.cached = b, 0
 }
 
+// reset forgets which stream the cursor was on, keeping the caller's cache
+// storage. A later at() sees a stream it does not recognize and restarts.
+func (x *xrefRows) reset() {
+	*x = xrefRows{
+		cache: x.cache,
+		data:  x.data, // Reuse memory
+	}
+	// TODO: reset x.data?
+}
+
 // at returns row i of section s's stream. The returned bytes live in x and die
 // at the next call.
 func (x *xrefRows) at(r io.ReaderAt, s *xrefSection, i int64) ([]byte, error) {

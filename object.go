@@ -118,6 +118,15 @@ type objStm struct {
 	first int64
 }
 
+// reset forgets the object stream the cursor holds. num is the load flag, so
+// zeroing it alone would do, but the whole cursor is scratch.
+func (s *objStm) reset() {
+	*s = objStm{
+		data: s.data, // Reuse memory.
+	}
+	// TODO: reset internal.Stream?
+}
+
 // Filtered reports whether the payload needs decoding to be read.
 func (sp StreamPayload) Filtered() bool { return sp.codec.flate }
 

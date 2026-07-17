@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	canvas "github.com/soypat/piudf/piupage"
 	doc "github.com/soypat/piudf/piupage/piudoc"
@@ -39,7 +40,7 @@ func main() {
 	h1 := doc.Style{Font: "Helvetica-Bold", Size: 20, Leading: 24, Color: DARK}
 	smallBold := doc.Style{Font: "Helvetica-Bold", Size: 8.5, Leading: 11.5, Color: GREY}
 	tot := doc.Style{Font: "Helvetica", Size: 12, Leading: 15, Color: DARK}
-
+	start := time.Now()
 	d := doc.New(f, doc.A4, doc.Margins{Left: 22 * mm, Right: 22 * mm, Top: 20 * mm, Bottom: 20 * mm})
 	d.Title = "Commercial Invoice 0001-2026"
 	d.Author = "Jane Doe"
@@ -163,7 +164,7 @@ func main() {
 	if err := d.Build(story); err != nil {
 		fatal(err)
 	}
-	fmt.Println("wrote", out)
+	fmt.Println("wrote", out, "in", time.Since(start).Round(time.Microsecond))
 }
 
 func fatal(err error) {

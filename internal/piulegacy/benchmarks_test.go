@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-const embeddedPDF = "testdata/basis-of-embedded.pdf"
+const embeddedPDF = "../../testdata/basis-of-embedded.pdf"
 
 // loadFile decodes the PDF at path and returns the decoder, the raw bytes
 // and the location of every live object in the file.

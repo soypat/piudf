@@ -348,6 +348,13 @@ func (pdf *PDF) decode(r io.ReaderAt, size int64, codec *Codec) error {
 	}
 	buf := codec.buf
 	pdf.Reset()
+	// A reused Codec still holds the previous decode's scratch: pushed-back
+	// tokens, the two stream cursors, and — the one that silently corrupts —
+	// the lexer window's resident bytes. The header and tail reads below land
+	// straight in buf, which is the window's fill buffer, so the window's
+	// base/n would still describe bytes those reads have overwritten. Reset
+	// forgets all of it so this decode starts as a fresh Codec would.
+	codec.Reset()
 	header := buf[:5]
 	n, err := readAtFull(r, header, 0)
 	if err != nil {

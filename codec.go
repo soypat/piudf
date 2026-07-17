@@ -424,6 +424,22 @@ func (c *Codec) lexAt(r io.ReaderAt, off int64) error {
 func (c *Codec) lexbuf() []byte { return c.buf[:len(c.buf)/2] }
 func (c *Codec) recbuf() []byte { return c.buf[len(c.buf)/2:] }
 
+// Reset drops the scratch a decode leaves behind — pushed-back tokens, the
+// error accumulator, the lexer window's resident bytes and both stream cursors
+// — while keeping the configuration Configure set (buffer, bounds, caches). It
+// is what makes a Codec reusable: [PDF.Decode] calls it, so one Codec may
+// decode any number of documents. Call it directly to reuse a Codec whose last
+// decode or resolve failed partway and left a cursor mid-stream.
+func (c *Codec) Reset() {
+	c.npb = 0
+	c.stmDepth = 0
+	c.accumErr = nil
+	c.auxcounter = 0
+	c.lex.DropBuffered() // TODO: see if Reset(nil, nil) gets the job done.
+	c.rows.reset()
+	c.stm.reset()
+}
+
 // validate reports a Codec that Configure never accepted, which is the only
 // way one reaches a decode unusable.
 func (c *Codec) validate() error {
