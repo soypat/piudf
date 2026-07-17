@@ -1,4 +1,4 @@
-// Package piudf implements a lazy, memory-constrained PDF decoder.
+// package piudf implements a lazy, memory-constrained PDF decoder.
 //
 // The package splits responsibilities between two types. PDF is the lazy
 // index of one document — its cross-reference sections and trailer
