@@ -273,23 +273,21 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	}
 	codec.auxcounter = 0
 	var w [3]uint8
-	err = codec.ArrayIterate(r, wV, func(v Value) bool {
+	err = codec.ArrayForEach(r, wV, func(v Value) bool {
 		n, ok := v.Int()
+		codec.auxcounter++
 		ok = ok && n >= 0 && n <= 8 && codec.auxcounter < len(w)
 		if !ok {
 			codec.accumErr = errXrefStreamBad
 			return false
 		}
 		w[codec.auxcounter] = uint8(n)
-		codec.auxcounter++
 		return true
 	})
 	if err != nil {
 		return 0, err
 	} else if codec.accumErr != nil {
 		return 0, codec.accumErr
-	} else if codec.auxcounter != len(w) {
-		return 0, errXrefStreamBad // /W is exactly three widths.
 	}
 
 	// TODO: decode the /W rows of the stream payload into sections and return
@@ -297,45 +295,6 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	// not random-access on disk like classic records, so something must hold
 	// them; PDF must stay lazy, so not there.
 	return 0, errTODO
-}
-
-// ArrayIterate calls push with each element of array arrVal in order,
-// stopping early when push returns false. Elements come through
-// decodeShallow, so "1 0 R" arrives as one reference Value and a nested
-// array or dictionary as one span Value; nothing is materialized.
-func (codec *Codec) ArrayIterate(r io.ReaderAt, arrVal Value, push func(Value) bool) error {
-	v := arrVal
-	if !v.IsArray() {
-		return errValueMismatch
-	} else if err := codec.lexValueSpan(r, v); err != nil {
-		return err
-	}
-	tok, _, _ := codec.lex.NextToken()
-	if tok != piulex.TokArrayOpen {
-		return errUnexpectedToken
-	}
-	for {
-		// decodeShallow does not know the array's terminator, so the closing
-		// bracket is recognized here and every other token handed back to it.
-		nt, _, err := codec.nextRaw()
-		if err != nil {
-			return err
-		}
-		switch nt.Tok {
-		case piulex.TokArrayClose:
-			return nil
-		case piulex.TokEOF:
-			return errUnexpectedEOF
-		}
-		codec.unread(nt)
-		ev, err := codec.decodeShallow()
-		if err != nil {
-			return err
-		}
-		if !push(tagObjStm(ev, v.Stm)) {
-			return nil
-		}
-	}
 }
 
 func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {

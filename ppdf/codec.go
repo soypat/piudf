@@ -26,19 +26,72 @@ type Codec struct {
 	MaxLazySections int
 	MaxDepth        int
 	auxcounter      int
+	auxkey          string
 }
 
-func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (Value, error) {
+// ArrayForEach calls push with each element of array arrVal in order,
+// stopping early when push returns false. Elements come through
+// decodeShallow, so "1 0 R" arrives as one reference Value and a nested
+// array or dictionary as one span Value; nothing is materialized.
+func (codec *Codec) ArrayForEach(r io.ReaderAt, arrVal Value, push func(Value) bool) error {
+	v := arrVal
+	if !v.IsArray() {
+		return errValueMismatch
+	} else if err := codec.lexValueSpan(r, v); err != nil {
+		return err
+	}
+	tok, _, _ := codec.lex.NextToken()
+	if tok != piulex.TokArrayOpen {
+		return errUnexpectedToken
+	}
+	for {
+		// decodeShallow does not know the array's terminator, so the closing
+		// bracket is recognized here and every other token handed back to it.
+		nt, _, err := codec.nextRaw()
+		if err != nil {
+			return err
+		}
+		switch nt.Tok {
+		case piulex.TokArrayClose:
+			return nil
+		case piulex.TokEOF:
+			return errUnexpectedEOF
+		}
+		codec.unread(nt)
+		ev, err := codec.decodeShallow()
+		if err != nil {
+			return err
+		}
+		if !push(tagObjStm(ev, v.Stm)) {
+			return nil
+		}
+	}
+}
+
+func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (ret Value, err error) {
+	ret = Value{Tok: piulex.TokNull}
+	d.auxkey = key
+	err = d.DictForEach(r, dictVal, func(bkey []byte, v Value) bool {
+		if bequal(bkey, d.auxkey) {
+			ret = v
+			return false
+		}
+		return true
+	})
+	return ret, err
+}
+
+func (d *Codec) DictForEach(r io.ReaderAt, dictVal Value, push func(key []byte, v Value) bool) error {
 	v := dictVal
 	if v.Tok != tokDict && v.Tok != tokStream {
-		return Value{}, errUnexpectedToken
+		return errUnexpectedToken
 	}
 	if err := d.lexValueSpan(r, v); err != nil {
-		return Value{}, err
+		return err
 	}
 	tok, _, _ := d.lex.NextToken()
 	if tok != tokDict {
-		return Value{}, errUnexpectedToken
+		return errUnexpectedToken
 	}
 	for {
 		// Keys must come through next(): parseShallow's reference
@@ -46,22 +99,23 @@ func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (Value, error)
 		// pushback queue.
 		tv, lit, err := d.nextRaw()
 		if err != nil {
-			return Value{}, err
+			return err
 		}
 		switch tv.Tok {
 		case piulex.TokDictClose:
-			return Value{Tok: piulex.TokNull}, nil // Key absent.
+			return nil // Dictionary done.
 		case piulex.TokName:
-			match := bequal(lit, key)
+			key := append(d.buf[:0], lit...)
 			val, err := d.decodeShallow()
 			if err != nil {
-				return Value{}, err
+				return err
 			}
-			if match {
-				return tagObjStm(val, v.Stm), nil
+			ok := push(key, tagObjStm(val, v.Stm))
+			if !ok {
+				return nil // User requested end of iteration.
 			}
 		default:
-			return Value{}, errUnexpectedToken // expected name as dictionary key
+			return errUnexpectedToken // expected name as dictionary key
 		}
 	}
 }

@@ -45,20 +45,20 @@ func newCodec(buf []byte) *Codec {
 	return c
 }
 
-// TestArrayIterate covers the two element kinds a raw token loop gets wrong:
+// TestArrayForEach covers the two element kinds a raw token loop gets wrong:
 // an indirect reference is three tokens that must arrive as one Value, and a
 // nested composite is a span, not its contents. It also pins that the closing
 // bracket is never pushed.
-func TestArrayIterate(t *testing.T) {
+func TestArrayForEach(t *testing.T) {
 	const src = `[1 0 R 42 (s) [7 8] <</K 1>> /N]`
 	c := newCodec(make([]byte, 2048))
 	var got []Value
-	err := c.ArrayIterate(strings.NewReader(src), Value{Tok: tokArray, I: 0}, func(v Value) bool {
+	err := c.ArrayForEach(strings.NewReader(src), Value{Tok: tokArray, I: 0}, func(v Value) bool {
 		got = append(got, v)
 		return true
 	})
 	if err != nil {
-		t.Fatalf("ArrayIterate: %v", err)
+		t.Fatalf("ArrayForEach: %v", err)
 	}
 	want := []piulex.Token{
 		piulex.TokR, piulex.TokInt, piulex.TokString, tokArray, tokDict, piulex.TokName,
@@ -79,28 +79,28 @@ func TestArrayIterate(t *testing.T) {
 	}
 }
 
-// TestArrayIterateStopsEarly pins the push contract: false means stop, and no
+// TestArrayForEachStopsEarly pins the push contract: false means stop, and no
 // further element is read.
-func TestArrayIterateStopsEarly(t *testing.T) {
+func TestArrayForEachStopsEarly(t *testing.T) {
 	c := newCodec(make([]byte, 2048))
 	n := 0
-	err := c.ArrayIterate(strings.NewReader(`[1 2 3 4]`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+	err := c.ArrayForEach(strings.NewReader(`[1 2 3 4]`), Value{Tok: tokArray, I: 0}, func(Value) bool {
 		n++
 		return n < 2
 	})
 	if err != nil {
-		t.Fatalf("ArrayIterate: %v", err)
+		t.Fatalf("ArrayForEach: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("push called %d times, want 2", n)
 	}
 }
 
-// TestArrayIterateUnterminated guards against a truncated array spinning: EOF
+// TestArrayForEachUnterminated guards against a truncated array spinning: EOF
 // is not the array terminator.
-func TestArrayIterateUnterminated(t *testing.T) {
+func TestArrayForEachUnterminated(t *testing.T) {
 	c := newCodec(make([]byte, 2048))
-	err := c.ArrayIterate(strings.NewReader(`[1 2 3`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+	err := c.ArrayForEach(strings.NewReader(`[1 2 3`), Value{Tok: tokArray, I: 0}, func(Value) bool {
 		return true
 	})
 	if err != errUnexpectedEOF {
