@@ -79,6 +79,16 @@ func (v Value) Int() (_ int64, ok bool) {
 	return v.I, v.Tok == piulex.TokInt
 }
 
+// IsArray returns true if the value references an array with entries.
+func (v Value) IsArray() bool {
+	return v.Tok == tokArray
+}
+
+// IsDict returns true if the value references a dictionary with entries that can be searched by [PDF.GetDict]
+func (v Value) IsDict() bool {
+	return v.Tok == tokDict
+}
+
 // IsNull reports whether v is the PDF null object or an invalid Value.
 func (v Value) IsNull() bool { return v.Tok == piulex.TokNull || v.Tok <= piulex.TokEOF }
 

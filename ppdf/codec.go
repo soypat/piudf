@@ -25,6 +25,7 @@ type Codec struct {
 	accumErr        error
 	MaxLazySections int
 	MaxDepth        int
+	auxcounter      int
 }
 
 func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (Value, error) {
@@ -63,6 +64,19 @@ func (d *Codec) DictGet(r io.ReaderAt, dictVal Value, key string) (Value, error)
 			return Value{}, errUnexpectedToken // expected name as dictionary key
 		}
 	}
+}
+
+func (d *Codec) dictGetAccum(r io.ReaderAt, dictVal Value, key string, want piulex.Token) Value {
+	if d.accumErr != nil {
+		return Value{}
+	}
+	v, err := d.DictGet(r, dictVal, key)
+	if err != nil {
+		d.accumErr = err
+	} else if v.Tok != want {
+		d.accumErr = errUnexpectedToken
+	}
+	return v
 }
 
 // lexValueSpan positions the lexer at span v's first byte: in the file via

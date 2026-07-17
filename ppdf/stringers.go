@@ -17,24 +17,25 @@ func _() {
 	_ = x[ErrCodecDepthLimit-7]
 	_ = x[ErrInvalidCodecConfig-8]
 	_ = x[errTODO-9]
-	_ = x[_errLexErrorsStart-10]
-	_ = x[errXrefStreamBad-11]
-	_ = x[errXrefStreamMissingDict-12]
-	_ = x[errXrefStreamMissingTok-13]
-	_ = x[ErrIllegalToken-14]
-	_ = x[errUnexpectedToken-15]
-	_ = x[ErrPrevLoop-16]
-	_ = x[errPrevChainTooLong-17]
-	_ = x[errExpectedXref-18]
-	_ = x[errBadSubsectionStart-19]
-	_ = x[errExpectingSubsectionOrTrailer-20]
-	_ = x[errBadXrefStreamObjectHeader-21]
-	_ = x[errUnexpectedEOF-22]
+	_ = x[errValueMismatch-10]
+	_ = x[_errLexErrorsStart-11]
+	_ = x[errXrefStreamBad-12]
+	_ = x[errXrefStreamMissingDict-13]
+	_ = x[errXrefStreamMissingTok-14]
+	_ = x[ErrIllegalToken-15]
+	_ = x[errUnexpectedToken-16]
+	_ = x[ErrPrevLoop-17]
+	_ = x[errPrevChainTooLong-18]
+	_ = x[errExpectedXref-19]
+	_ = x[errBadSubsectionStart-20]
+	_ = x[errExpectingSubsectionOrTrailer-21]
+	_ = x[errBadXrefStreamObjectHeader-22]
+	_ = x[errUnexpectedEOF-23]
 }
 
-const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configPDF feature not implemented yetxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headerunexpected end of file"
+const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configPDF feature not implemented yetvalue kind/type mismatchxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headerunexpected end of file"
 
-var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 206, 206, 231, 255, 291, 304, 320, 336, 356, 379, 405, 456, 485, 507}
+var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 206, 230, 230, 255, 279, 315, 328, 344, 360, 380, 403, 429, 480, 509, 531}
 
 func (i genericErr) String() string {
 	idx := int(i) - 1

@@ -26,7 +26,7 @@ const (
 	ErrCodecDepthLimit               // Codec depth limit hit
 	ErrInvalidCodecConfig            // Codec invalid config
 	errTODO                          // PDF feature not implemented yet
-
+	errValueMismatch                 // value kind/type mismatch
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error
@@ -262,11 +262,62 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	if err != nil {
 		return 0, err
 	}
+	// Scalar entries; ISO 32000-1 7.5.8.2 requires them to be direct.
+	size := codec.dictGetAccum(r, dictV, "Size", piulex.TokInt)
+	length := codec.dictGetAccum(r, dictV, "Length", piulex.TokInt)
+
+	wV := codec.dictGetAccum(r, dictV, "W", tokArray)
+	if codec.accumErr != nil {
+		return 0, codec.accumErr
+	}
+	codec.auxcounter = 0
+	var w [3]uint8
+	err = codec.ArrayIterate(r, wV, func(v Value) bool {
+		codec.auxcounter++
+		n, ok := v.Int()
+		ok = ok && n >= 0 && n <= 8 && codec.auxcounter < 3
+		if ok {
+			w[codec.auxcounter] = uint8(n)
+		} else {
+			codec.accumErr = errXrefStreamBad
+		}
+		return ok
+	})
+	if err != nil {
+		return 0, err
+	} else if codec.accumErr != nil {
+		return 0, codec.accumErr
+	}
+
 	// TODO: decode the /W rows of the stream payload into sections and return
 	// the dict's /Prev. Undecided: who owns the decompressed rows. They are
 	// not random-access on disk like classic records, so something must hold
 	// them; PDF must stay lazy, so not there.
 	return 0, errTODO
+}
+
+func (codec *Codec) ArrayIterate(r io.ReaderAt, arrVal Value, push func(Value) bool) error {
+	v := arrVal
+	if !v.IsArray() {
+		return errValueMismatch
+	} else if err := codec.lexValueSpan(r, v); err != nil {
+		return err
+	}
+	tok, _, _ := codec.lex.NextToken()
+	if tok != piulex.TokArrayOpen {
+		return errUnexpectedToken
+	}
+	for tok != piulex.TokArrayClose {
+		nt, _, err := codec.nextRaw()
+		if err != nil {
+			return err
+		}
+		if !push(nt) {
+			break
+		}
+		tok = nt.Tok
+	}
+	return nil
 }
 
 func (p *PDF) lookupXref(r io.ReaderAt, num uint32, codec *Codec) (xrefRecord, error) {
