@@ -3,7 +3,10 @@ package ppdf
 import (
 	"io"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/soypat/piudf/ppdf/piulex"
 )
 
 // countingReaderAt records the reads a Decode issues. Read count is the
@@ -40,6 +43,69 @@ func newCodec(buf []byte) *Codec {
 	c := &Codec{MaxLazySections: 64, MaxDepth: 32}
 	c.SetBuffer(buf)
 	return c
+}
+
+// TestArrayIterate covers the two element kinds a raw token loop gets wrong:
+// an indirect reference is three tokens that must arrive as one Value, and a
+// nested composite is a span, not its contents. It also pins that the closing
+// bracket is never pushed.
+func TestArrayIterate(t *testing.T) {
+	const src = `[1 0 R 42 (s) [7 8] <</K 1>> /N]`
+	c := newCodec(make([]byte, 2048))
+	var got []Value
+	err := c.ArrayIterate(strings.NewReader(src), Value{Tok: tokArray, I: 0}, func(v Value) bool {
+		got = append(got, v)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ArrayIterate: %v", err)
+	}
+	want := []piulex.Token{
+		piulex.TokR, piulex.TokInt, piulex.TokString, tokArray, tokDict, piulex.TokName,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d elements, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Tok != want[i] {
+			t.Errorf("element %d: got %v, want %v", i, got[i].Tok, want[i])
+		}
+	}
+	if id := got[0].ObjectID(); id.Num != 1 || id.Gen != 0 {
+		t.Errorf("element 0: got %v, want object 1 gen 0", id)
+	}
+	if n, ok := got[1].Int(); !ok || n != 42 {
+		t.Errorf("element 1: got %v (ok=%v), want 42", n, ok)
+	}
+}
+
+// TestArrayIterateStopsEarly pins the push contract: false means stop, and no
+// further element is read.
+func TestArrayIterateStopsEarly(t *testing.T) {
+	c := newCodec(make([]byte, 2048))
+	n := 0
+	err := c.ArrayIterate(strings.NewReader(`[1 2 3 4]`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+		n++
+		return n < 2
+	})
+	if err != nil {
+		t.Fatalf("ArrayIterate: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("push called %d times, want 2", n)
+	}
+}
+
+// TestArrayIterateUnterminated guards against a truncated array spinning: EOF
+// is not the array terminator.
+func TestArrayIterateUnterminated(t *testing.T) {
+	c := newCodec(make([]byte, 2048))
+	err := c.ArrayIterate(strings.NewReader(`[1 2 3`), Value{Tok: tokArray, I: 0}, func(Value) bool {
+		return true
+	})
+	if err != errUnexpectedEOF {
+		t.Errorf("got %v, want %v", err, errUnexpectedEOF)
+	}
 }
 
 // TestDecodeClassicReadCount pins the point of the offset-addressed window:
