@@ -34,6 +34,8 @@ const (
 	errStreamBadLength               // stream /Length missing or out of bounds
 	errObjStmNested                  // object stream within an object stream
 	errObjStmBad                     // object stream /N, /First or offset out of bounds
+	errEncoderState                  // Encoder method called out of sequence
+	errEncoderBase                   // Encoder base document unusable for append
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error

@@ -25,25 +25,27 @@ func _() {
 	_ = x[errStreamBadLength-15]
 	_ = x[errObjStmNested-16]
 	_ = x[errObjStmBad-17]
-	_ = x[_errLexErrorsStart-18]
-	_ = x[errXrefStreamBad-19]
-	_ = x[errXrefStreamMissingDict-20]
-	_ = x[errXrefStreamMissingTok-21]
-	_ = x[ErrIllegalToken-22]
-	_ = x[errUnexpectedToken-23]
-	_ = x[ErrPrevLoop-24]
-	_ = x[errPrevChainTooLong-25]
-	_ = x[errExpectedXref-26]
-	_ = x[errBadSubsectionStart-27]
-	_ = x[errExpectingSubsectionOrTrailer-28]
-	_ = x[errBadXrefStreamObjectHeader-29]
-	_ = x[errBadObjectHeader-30]
-	_ = x[errUnexpectedEOF-31]
+	_ = x[errEncoderState-18]
+	_ = x[errEncoderBase-19]
+	_ = x[_errLexErrorsStart-20]
+	_ = x[errXrefStreamBad-21]
+	_ = x[errXrefStreamMissingDict-22]
+	_ = x[errXrefStreamMissingTok-23]
+	_ = x[ErrIllegalToken-24]
+	_ = x[errUnexpectedToken-25]
+	_ = x[ErrPrevLoop-26]
+	_ = x[errPrevChainTooLong-27]
+	_ = x[errExpectedXref-28]
+	_ = x[errBadSubsectionStart-29]
+	_ = x[errExpectingSubsectionOrTrailer-30]
+	_ = x[errBadXrefStreamObjectHeader-31]
+	_ = x[errBadObjectHeader-32]
+	_ = x[errUnexpectedEOF-33]
 }
 
-const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configPDF feature not implemented yetvalue kind/type mismatchname longer than implementation limitobject number outside every xref sectionobject header does not match its xref entryvalue is not a stream objectstream /Length missing or out of boundsobject stream within an object streamobject stream /N, /First or offset out of boundsxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headerbad 'N G obj' object headerunexpected end of file"
+const _genericErr_name = "missing %PDF- headermissing startxrefmalformed startxrefReadAt did incomplete readxref offset out of file boundsCodec memory limit hitCodec depth limit hitCodec invalid configPDF feature not implemented yetvalue kind/type mismatchname longer than implementation limitobject number outside every xref sectionobject header does not match its xref entryvalue is not a stream objectstream /Length missing or out of boundsobject stream within an object streamobject stream /N, /First or offset out of boundsEncoder method called out of sequenceEncoder base document unusable for appendxref stream generic errorxref stream missing dictxref stream missing 'stream' keywordillegal tokenunexpected token/Prev loop found/Prev chain too longexpected 'xref' keywordbad subsection start/entryunexpected token looking for subsections or trailerbad xref stream object headerbad 'N G obj' object headerunexpected end of file"
 
-var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 206, 230, 267, 307, 350, 378, 417, 454, 502, 502, 527, 551, 587, 600, 616, 632, 652, 675, 701, 752, 781, 808, 830}
+var _genericErr_index = [...]uint16{0, 20, 37, 56, 82, 112, 134, 155, 175, 206, 230, 267, 307, 350, 378, 417, 454, 502, 539, 580, 580, 605, 629, 665, 678, 694, 710, 730, 753, 779, 830, 859, 886, 908}
 
 func (i genericErr) String() string {
 	idx := int(i) - 1
