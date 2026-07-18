@@ -49,6 +49,10 @@ type Stream struct {
 	sink [256]byte
 }
 
+func (strm *Stream) ConfigureDefault() {
+	strm.Configure(zlib.DefaultConfig())
+}
+
 func (strm *Stream) Configure(config zlib.Config) error {
 	return strm.zr.Configure(config)
 }

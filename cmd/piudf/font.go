@@ -108,6 +108,12 @@ func (c *ctx) inherited(dict piudf.Value, key string) (piudf.Value, error) {
 	return piudf.Value{}, fmt.Errorf("/Parent chain deeper than %d", maxPageDepth)
 }
 
+var strm piudf.Stream
+
+func init() {
+	strm.ConfigureDefault()
+}
+
 // loadFont reads a font's code-to-text map. /ToUnicode is authoritative and
 // says so explicitly; /Encoding /Differences is the older way and names
 // glyphs, which only map back to text because the names are conventional.
@@ -190,7 +196,7 @@ func loadFont(c *ctx, id piudf.ObjectID) (*font, error) {
 // a few hundred bytes; the library hands back a reader precisely so the
 // caller decides this.
 func readAllStream(c *ctx, v piudf.Value) ([]byte, error) {
-	rd, err := c.pdf.OpenStream(c.r, v, new(piudf.Stream), c.codec)
+	rd, err := c.pdf.OpenStream(c.r, v, &strm, c.codec)
 	if err != nil {
 		return nil, err
 	}

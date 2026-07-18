@@ -172,7 +172,9 @@ func TestEncoderFresh(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rd, err := p.OpenStream(r, cv, new(Stream), codec)
+		var strm Stream
+		strm.ConfigureDefault()
+		rd, err := p.OpenStream(r, cv, &strm, codec)
 		if err != nil {
 			t.Fatal(err)
 		}

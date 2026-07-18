@@ -3,7 +3,6 @@ package piudf
 import (
 	"io"
 
-	"github.com/soypat/piudf/internal/zlib"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -207,16 +206,6 @@ func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, s *Stream) (io.Read
 		// rather than bytes, which is xrefRows' business; a content stream
 		// does not.
 		return nil, errTODO
-	}
-	if sp.codec.flate {
-		// This reader is the caller's, independent of the Codec's cursors, so it
-		// gets its own inflate memory rather than borrowing theirs. Default sizes
-		// so it never rejects a stream; the allocation is the price of a reader
-		// that outlives the next Codec call, which the hot path avoids by using
-		// Resolve.
-		if err := s.Configure(zlib.DefaultConfig()); err != nil {
-			return nil, err
-		}
 	}
 	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
 		return nil, err
