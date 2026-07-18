@@ -1,10 +1,10 @@
 package internal
 
 import (
-	"bufio"
-	"compress/zlib"
 	"errors"
 	"io"
+
+	"github.com/soypat/piudf/internal/zlib"
 )
 
 // Stream reads one span of a file as a byte stream, inflating it when the span
@@ -23,9 +23,18 @@ import (
 // them: that window is the one allocation it makes, and it makes it once.
 type Stream struct {
 	span spanReader
-	// bsrc buffers span for the inflater, which reads a byte at a time.
-	bsrc *bufio.Reader
-	zr   zlibReader
+	// zr inflates span. It owns its working memory (see zrReady) and is reused
+	// across every Reset, so a rewind re-inflates without allocating.
+	zr zlib.Reader
+	// InflateConfig is the memory zr works out of, set before the first
+	// compressed span. Any buffer left nil is allocated with a safe default on
+	// first use (see inflate); the SkipChecksum flag is honored regardless.
+	// InflateConfig zlib.Config
+
+	// zrReady reports that zr has been configured; its buffers are allocated
+	// once, on the first compressed span.
+	// zrReady bool
+
 	// rd is span decoded: the inflater, or span itself when uncompressed. A
 	// nil rd means unbound.
 	rd io.Reader
@@ -38,6 +47,10 @@ type Stream struct {
 	// sink absorbs the bytes a forward seek skips. They are decoded and
 	// dropped: reaching an offset means decoding everything before it.
 	sink [256]byte
+}
+
+func (strm *Stream) Configure(config zlib.Config) error {
+	return strm.zr.Configure(config)
 }
 
 // ErrStreamUnbound is returned by reads on a Stream that Reset has not bound
@@ -146,33 +159,21 @@ func (s *Stream) ReadAt(b []byte, off int64) (int, error) {
 	return n, err
 }
 
-// inflate points s's zlib reader at src, allocating its window on first use
-// and reusing it for every span after. src goes through a bufio.Reader because
-// compress/flate reads a byte at a time and wraps any source lacking ReadByte
-// in a bufio.Reader of its own, per call.
+// inflate points s's zlib reader at src, configuring it (its one allocation)
+// on first use and reusing it for every span after. The reader owns its inflate
+// window, overflow tables and read buffer, so a rewind re-inflates without
+// allocating — unlike compress/zlib, which reallocates its Huffman tables on
+// every dynamic block.
 func (s *Stream) inflate(src io.Reader) (io.Reader, error) {
-	if s.bsrc == nil {
-		s.bsrc = bufio.NewReader(src)
-	} else {
-		s.bsrc.Reset(src)
+	if err := s.zr.Reset(src); err != nil {
+		return nil, err
 	}
-	if s.zr == nil {
-		zr, err := zlib.NewReader(s.bsrc)
-		if err != nil {
-			return nil, err
-		}
-		s.zr = zr.(zlibReader)
-		return s.zr, nil
-	}
-	return s.zr, s.zr.Reset(s.bsrc, nil)
+	return &s.zr, nil
 }
 
-// zlibReader is an inflater that can be pointed at a new source without
-// reallocating its window.
-type zlibReader interface {
-	io.ReadCloser
-	zlib.Resetter
-}
+// zlibInputBuf is the fill buffer the inflater reads the payload through. A few
+// KB keeps reads infrequent without holding meaningful memory.
+const zlibInputBuf = 4096
 
 // spanReader reads one file span as a stream. It is a field of the Stream that
 // uses it and never escapes, which is the point: an io.SectionReader per span

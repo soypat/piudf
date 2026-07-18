@@ -5,7 +5,19 @@ import (
 	"compress/zlib"
 	"io"
 	"testing"
+
+	pzlib "github.com/soypat/piudf/internal/zlib"
 )
+
+// newStream returns a Stream configured with default inflate memory.
+func newStream(t testing.TB) *Stream {
+	t.Helper()
+	var s Stream
+	if err := s.Configure(pzlib.DefaultConfig()); err != nil {
+		t.Fatal(err)
+	}
+	return &s
+}
 
 // payload returns src as a file: the compressed bytes preceded by padding, so
 // the span offset under test is not zero and a Stream ignoring it would read
@@ -39,7 +51,7 @@ func testData(n int) []byte {
 func TestStreamReadAt(t *testing.T) {
 	src := testData(5000)
 	r, off, length := payload(t, src)
-	var s Stream
+	s := newStream(t)
 	if err := s.Reset(r, off, length, true); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +75,7 @@ func TestStreamReadAt(t *testing.T) {
 func TestStreamReadAtEOF(t *testing.T) {
 	src := testData(10)
 	r, off, length := payload(t, src)
-	var s Stream
+	s := newStream(t)
 	if err := s.Reset(r, off, length, true); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +115,7 @@ func TestStreamRebind(t *testing.T) {
 	a, b := testData(3000), testData(40)
 	ra, offA, lenA := payload(t, a)
 	rb, offB, lenB := payload(t, b)
-	var s Stream
+	s := newStream(t)
 	if err := s.Reset(ra, offA, lenA, true); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +132,7 @@ func TestStreamRebind(t *testing.T) {
 	if s.Reader() != rb || s.Offset() != offB {
 		t.Error("Reader/Offset still report the old span")
 	}
-	got, err := io.ReadAll(&s)
+	got, err := io.ReadAll(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,18 +153,12 @@ func TestStreamUnbound(t *testing.T) {
 }
 
 // TestStreamAllocs pins reading costing nothing, which is the whole claim: the
-// inflate window is made once and every read after works out of it. A Stream
-// that reallocated per read would still pass every test above.
-//
-// Reset is excluded, and not because it is free: compress/zlib allocates an
-// adler32 hash on every Reset, 4 bytes we cannot decline without inflating
-// through compress/flate and checking the zlib framing by hand. It is charged
-// once per stream switch rather than per read, which is why the cursors are
-// shaped to switch rarely.
+// inflate memory is configured once and every read after works out of it. A
+// Stream that reallocated per read would still pass every test above.
 func TestStreamAllocs(t *testing.T) {
 	src := testData(2000)
 	r, off, length := payload(t, src)
-	var s Stream
+	s := newStream(t)
 	if err := s.Reset(r, off, length, true); err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"io"
 	"math"
 
+	"github.com/soypat/piudf/internal/zlib"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -93,6 +94,16 @@ type DecoderConfig struct {
 	// MaxDepth caps how deeply dictionaries and arrays may nest. It costs a
 	// counter, not memory.
 	MaxDepth int
+
+	// XrefStreamConfig and ObjectStreamConfig are the inflate memory for the two
+	// decompression cursors a Codec keeps: the cross-reference stream decoder
+	// (PDF 1.5 xref streams) and the object stream decoder. They must be
+	// distinct buffer sets — the two cursors can be live at once, so sharing
+	// memory would silently corrupt one. A zero Config for either is replaced
+	// with [zlib.DefaultConfig] (which allocates); pass your own to own the
+	// memory or to set [zlib.Config.SkipChecksum].
+	XrefStreamConfig   zlib.Config
+	ObjectStreamConfig zlib.Config
 }
 
 // Configure hands c the memory and bounds of cfg, replacing any earlier
@@ -105,6 +116,24 @@ func (c *Codec) Configure(cfg DecoderConfig) error {
 	case cfg.MaxLazySections < 1, cfg.MaxDepth < 1:
 		return ErrInvalidCodecConfig
 	}
+	// Each decompression cursor gets its own inflate memory; a zero Config
+	// means "use defaults" (which allocates). The two must never share buffers
+	// — see [DecoderConfig.XrefStreamConfig].
+	xrefCfg := cfg.XrefStreamConfig
+	if xrefCfg.IsZero() {
+		xrefCfg = zlib.DefaultConfig()
+	}
+	objCfg := cfg.ObjectStreamConfig
+	if objCfg.IsZero() {
+		objCfg = zlib.DefaultConfig()
+	}
+	if err := c.rows.data.Configure(xrefCfg); err != nil {
+		return err
+	}
+	if err := c.stm.data.Configure(objCfg); err != nil {
+		return err
+	}
+
 	c.buf = cfg.Buffer
 	c.maxLazySections = cfg.MaxLazySections
 	c.maxDepth = cfg.MaxDepth
@@ -117,6 +146,7 @@ func (c *Codec) Configure(cfg DecoderConfig) error {
 	// The cursor holds the cache rather than the Codec: it is the only thing
 	// that fills it, and it alone knows when what it holds stops being true.
 	c.rows.setCache(cfg.XrefCache)
+
 	return nil
 }
 
