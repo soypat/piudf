@@ -4,6 +4,7 @@ import (
 	"io"
 
 	"github.com/soypat/piudf/internal"
+	"github.com/soypat/piudf/internal/zlib"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -209,6 +210,16 @@ func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, codec *Codec) (io.R
 		return nil, pdf.setError(codec, errTODO)
 	}
 	s := new(internal.Stream)
+	if sp.codec.flate {
+		// This reader is the caller's, independent of the Codec's cursors, so it
+		// gets its own inflate memory rather than borrowing theirs. Default sizes
+		// so it never rejects a stream; the allocation is the price of a reader
+		// that outlives the next Codec call, which the hot path avoids by using
+		// Resolve.
+		if err := s.Configure(zlib.DefaultConfig()); err != nil {
+			return nil, pdf.setError(codec, err)
+		}
+	}
 	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
 		return nil, pdf.setError(codec, err)
 	}

@@ -115,8 +115,10 @@ type Reader struct {
 // Configure hands z the memory of cfg and validates its sizes, building the
 // fixed Huffman table once. It must be called before Reset.
 func (z *Reader) Configure(cfg Config) error {
-	if cfg.IsZero() && len(z.inf.br.buf) == 0 {
-		cfg = DefaultConfig()
+	if cfg.IsZero() {
+		if len(z.inf.br.buf) == 0 {
+			cfg = DefaultConfig()
+		}
 	}
 	if len(cfg.Window) < MaxWindow {
 		return ErrShortWindow

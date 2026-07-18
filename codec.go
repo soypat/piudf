@@ -116,21 +116,10 @@ func (c *Codec) Configure(cfg DecoderConfig) error {
 	case cfg.MaxLazySections < 1, cfg.MaxDepth < 1:
 		return ErrInvalidCodecConfig
 	}
-	// Each decompression cursor gets its own inflate memory; a zero Config
-	// means "use defaults" (which allocates). The two must never share buffers
-	// — see [DecoderConfig.XrefStreamConfig].
-	xrefCfg := cfg.XrefStreamConfig
-	if xrefCfg.IsZero() {
-		xrefCfg = zlib.DefaultConfig()
-	}
-	objCfg := cfg.ObjectStreamConfig
-	if objCfg.IsZero() {
-		objCfg = zlib.DefaultConfig()
-	}
-	if err := c.rows.data.Configure(xrefCfg); err != nil {
+	if err := c.rows.data.Configure(cfg.XrefStreamConfig); err != nil {
 		return err
 	}
-	if err := c.stm.data.Configure(objCfg); err != nil {
+	if err := c.stm.data.Configure(cfg.ObjectStreamConfig); err != nil {
 		return err
 	}
 
