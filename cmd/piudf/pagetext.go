@@ -167,7 +167,7 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving content %v: %w", ref, err)
 		}
-		rd, err := c.pdf.OpenStream(c.r, v, c.codec)
+		rd, err := c.pdf.OpenStream(c.r, v, new(ppdf.Stream), c.codec)
 		if err != nil {
 			return nil, fmt.Errorf("opening content %v: %w", ref, err)
 		}

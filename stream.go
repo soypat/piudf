@@ -1,4 +1,4 @@
-package internal
+package piudf
 
 import (
 	"errors"
@@ -170,10 +170,6 @@ func (s *Stream) inflate(src io.Reader) (io.Reader, error) {
 	}
 	return &s.zr, nil
 }
-
-// zlibInputBuf is the fill buffer the inflater reads the payload through. A few
-// KB keeps reads infrequent without holding meaningful memory.
-const zlibInputBuf = 4096
 
 // spanReader reads one file span as a stream. It is a field of the Stream that
 // uses it and never escapes, which is the point: an io.SectionReader per span

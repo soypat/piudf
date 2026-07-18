@@ -1,9 +1,8 @@
-package ppdf
+package piudf
 
 import (
 	"io"
 
-	"github.com/soypat/piudf/internal"
 	"github.com/soypat/piudf/internal/zlib"
 	"github.com/soypat/piudf/piulex"
 )
@@ -109,7 +108,7 @@ type StreamPayload struct {
 // serve a case that does not arise, since resolving an object finishes with
 // one stream before asking for the next.
 type objStm struct {
-	data internal.Stream
+	data Stream
 	// num is the object number of the stream, or zero when none is loaded.
 	num uint32
 	// n is /N, how many objects the stream holds, and first is /First, the
@@ -186,12 +185,12 @@ func (pdf *PDF) streamPayload(r io.ReaderAt, v Value, codec *Codec) (StreamPaylo
 // Decoding is streamed: nothing is buffered, so a reader over a 4 MB content
 // stream costs its inflate window and no more. The reader is valid until r is
 // closed and does not depend on codec afterwards.
-func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, codec *Codec) (io.Reader, error) {
+func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, s *Stream, codec *Codec) (io.Reader, error) {
 	sp, err := pdf.StreamPayload(r, v, codec)
 	if err != nil {
 		return nil, err
 	}
-	return pdf.OpenPayload(r, sp, codec)
+	return pdf.OpenPayload(r, sp, s)
 }
 
 // OpenPayload returns a reader over the decoded bytes of sp, for callers that
@@ -202,14 +201,13 @@ func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, codec *Codec) (io.Reader, err
 // call on codec. Callers reading many streams and holding none — the shape the
 // package is built for — should reach for [PDF.Resolve] and friends instead,
 // which reuse the Codec's cursors.
-func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, codec *Codec) (io.Reader, error) {
+func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, s *Stream) (io.Reader, error) {
 	if sp.codec.predictor > 1 {
 		// TODO: predictors. A cross-reference stream needs them and reads rows
 		// rather than bytes, which is xrefRows' business; a content stream
 		// does not.
-		return nil, pdf.setError(codec, errTODO)
+		return nil, errTODO
 	}
-	s := new(internal.Stream)
 	if sp.codec.flate {
 		// This reader is the caller's, independent of the Codec's cursors, so it
 		// gets its own inflate memory rather than borrowing theirs. Default sizes
@@ -217,11 +215,11 @@ func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, codec *Codec) (io.R
 		// that outlives the next Codec call, which the hot path avoids by using
 		// Resolve.
 		if err := s.Configure(zlib.DefaultConfig()); err != nil {
-			return nil, pdf.setError(codec, err)
+			return nil, err
 		}
 	}
 	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
-		return nil, pdf.setError(codec, err)
+		return nil, err
 	}
 	return s, nil
 }

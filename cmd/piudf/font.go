@@ -190,7 +190,7 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 // a few hundred bytes; the library hands back a reader precisely so the
 // caller decides this.
 func readAllStream(c *ctx, v ppdf.Value) ([]byte, error) {
-	rd, err := c.pdf.OpenStream(c.r, v, c.codec)
+	rd, err := c.pdf.OpenStream(c.r, v, new(ppdf.Stream), c.codec)
 	if err != nil {
 		return nil, err
 	}

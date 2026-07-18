@@ -1,9 +1,7 @@
-package ppdf
+package piudf
 
 import (
 	"io"
-
-	"github.com/soypat/piudf/internal"
 )
 
 // maxXrefRowLen bounds one decoded row. readWidths caps each of the three /W
@@ -23,7 +21,7 @@ const maxXrefRowLen = 24
 // lookups O(1). Here a sweep in object order — which is what walking an xref
 // costs — is still one decode pass, because object order is row order.
 type xrefRows struct {
-	data internal.Stream
+	data Stream
 	// cache is the caller's, from DecoderConfig, and holds rows [0, cached) of
 	// the stream the cursor is on: a prefix, because that is what a forward
 	// decode produces and a prefix is what a bounds check can serve. Rows past

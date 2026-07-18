@@ -1,4 +1,4 @@
-package ppdf
+package piudf
 
 import (
 	"bytes"
@@ -172,7 +172,7 @@ func TestEncoderFresh(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rd, err := p.OpenStream(r, cv, codec)
+		rd, err := p.OpenStream(r, cv, new(Stream), codec)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -1,4 +1,4 @@
-package internal
+package piudf
 
 import (
 	"bytes"
