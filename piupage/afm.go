@@ -1,6 +1,6 @@
-package canvas
+package piupage
 
-import ppdf "github.com/soypat/piudf"
+import "github.com/soypat/piudf"
 
 // Adobe AFM advance-width tables for the Helvetica family, indexed by WinAnsi
 // byte, in units of 1/1000 em. First cut ships the two weights the invoice
@@ -134,7 +134,7 @@ func (f *stdFont) Encode(dst []byte, r rune) []byte {
 	return append(dst, b)
 }
 
-func (f *stdFont) writeObjects(enc *ppdf.Encoder) (ppdf.ObjectID, error) {
+func (f *stdFont) writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error) {
 	id := enc.NewID()
 	enc.BeginObject(id)
 	enc.DictOpen()

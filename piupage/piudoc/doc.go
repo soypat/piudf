@@ -1,10 +1,10 @@
-package doc
+package piudoc
 
 import (
 	"io"
 
-	piudf "github.com/soypat/piudf"
-	canvas "github.com/soypat/piudf/piupage"
+	"github.com/soypat/piudf"
+	"github.com/soypat/piudf/piupage"
 )
 
 // Flowable is a layout element that measures itself then paints itself, the
@@ -13,7 +13,7 @@ import (
 // and is told the same availWidth the frame measured it with.
 type Flowable interface {
 	Wrap(availWidth float64) (w, h float64)
-	Draw(c *canvas.Canvas, x, yTop, availWidth float64)
+	Draw(c *piupage.Canvas, x, yTop, availWidth float64)
 }
 
 // PageSize is a page's dimensions in points.
@@ -65,12 +65,12 @@ func (d *Document) Build(story []Flowable) error {
 
 	// Flow the story into per-page canvases.
 	var (
-		canvases []*canvas.Canvas
+		canvases []*piupage.Canvas
 		cursorY  float64
 		pageTop  float64
 	)
-	newPage := func() *canvas.Canvas {
-		cv := canvas.NewCanvas(make([]byte, 512))
+	newPage := func() *piupage.Canvas {
+		cv := piupage.NewCanvas(make([]byte, 512))
 		canvases = append(canvases, cv)
 		cursorY = d.Size.H - d.Margins.Top
 		pageTop = cursorY
@@ -93,7 +93,7 @@ func (d *Document) Build(story []Flowable) error {
 			if _, ok := fontID[f.BaseName()]; ok {
 				continue
 			}
-			id, err := canvas.WriteFont(&d.enc, f)
+			id, err := piupage.WriteFont(&d.enc, f)
 			if err != nil {
 				return err
 			}

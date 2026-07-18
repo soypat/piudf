@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf"
 )
 
 func openCtx(t *testing.T, path string) *ctx {
@@ -15,13 +15,13 @@ func openCtx(t *testing.T, path string) *ctx {
 	}
 	t.Cleanup(func() { f.Close() })
 	st, _ := f.Stat()
-	codec := new(ppdf.Codec)
-	if err := codec.Configure(ppdf.DecoderConfig{
+	codec := new(piudf.Codec)
+	if err := codec.Configure(piudf.DecoderConfig{
 		Buffer: make([]byte, 8192), MaxLazySections: 4096, MaxDepth: 64,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	c := &ctx{pdf: new(ppdf.PDF), codec: codec, r: f, size: st.Size(), path: path}
+	c := &ctx{pdf: new(piudf.PDF), codec: codec, r: f, size: st.Size(), path: path}
 	c.decodeErr = c.pdf.Decode(c.r, c.size, c.codec)
 	return c
 }

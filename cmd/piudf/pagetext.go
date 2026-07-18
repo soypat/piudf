@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -47,35 +47,35 @@ func cmdPageText(c *ctx, args []string) error {
 // findPage returns the dictionary of page num, 1-based, by walking the page
 // tree in order. Order is the point: /Kids order is the document's page
 // order, so the nth leaf is the nth page.
-func findPage(c *ctx, num int) (ppdf.Value, error) {
+func findPage(c *ctx, num int) (piudf.Value, error) {
 	root, err := c.deref(c.pdf.Trailer(), "Root")
 	if err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	pages, err := c.deref(root, "Pages")
 	if err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	seen := 0
 	page, err := c.walkPages(pages, num, &seen, 0)
 	if err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	if page.IsNull() {
-		return ppdf.Value{}, fmt.Errorf("page %d not found: document has %d pages", num, seen)
+		return piudf.Value{}, fmt.Errorf("page %d not found: document has %d pages", num, seen)
 	}
 	return page, nil
 }
 
 // walkPages depth-first searches node for the num'th leaf, counting leaves
 // into seen. It returns null when the subtree holds fewer.
-func (c *ctx) walkPages(node ppdf.Value, num int, seen *int, depth int) (ppdf.Value, error) {
+func (c *ctx) walkPages(node piudf.Value, num int, seen *int, depth int) (piudf.Value, error) {
 	if depth > maxPageDepth {
-		return ppdf.Value{}, fmt.Errorf("page tree deeper than %d: /Kids loop?", maxPageDepth)
+		return piudf.Value{}, fmt.Errorf("page tree deeper than %d: /Kids loop?", maxPageDepth)
 	}
 	kids, err := c.codec.DictGet(c.pdf, c.r, node, "Kids")
 	if err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	if kids.IsNull() {
 		// No /Kids: a leaf, so this is a page.
@@ -83,42 +83,42 @@ func (c *ctx) walkPages(node ppdf.Value, num int, seen *int, depth int) (ppdf.Va
 		if *seen == num {
 			return node, nil
 		}
-		return ppdf.Value{Tok: piulex.TokNull}, nil
+		return piudf.Value{Tok: piulex.TokNull}, nil
 	}
 	if kids, err = c.pdf.Deref(c.r, kids, c.codec); err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	// ArrayForEach hands back one element at a time and the callback cannot
 	// recurse into another ArrayForEach: both share the Codec's lexer. So the
 	// references are collected first, then walked.
-	var refs []ppdf.ObjectID
-	err = c.codec.ArrayForEach(c.pdf, c.r, kids, func(v ppdf.Value) bool {
+	var refs []piudf.ObjectID
+	err = c.codec.ArrayForEach(c.pdf, c.r, kids, func(v piudf.Value) bool {
 		if v.Tok == piulex.TokR {
 			refs = append(refs, v.ObjectID())
 		}
 		return true
 	})
 	if err != nil {
-		return ppdf.Value{}, err
+		return piudf.Value{}, err
 	}
 	for _, ref := range refs {
 		kid, err := c.pdf.Resolve(c.r, ref, c.codec)
 		if err != nil {
-			return ppdf.Value{}, err
+			return piudf.Value{}, err
 		}
 		found, err := c.walkPages(kid, num, seen, depth+1)
 		if err != nil {
-			return ppdf.Value{}, err
+			return piudf.Value{}, err
 		}
 		if !found.IsNull() {
 			return found, nil
 		}
 	}
-	return ppdf.Value{Tok: piulex.TokNull}, nil
+	return piudf.Value{Tok: piulex.TokNull}, nil
 }
 
 // deref reads key from dictionary dict and resolves it if indirect.
-func (c *ctx) deref(dict ppdf.Value, key string) (ppdf.Value, error) {
+func (c *ctx) deref(dict piudf.Value, key string) (piudf.Value, error) {
 	v, err := c.codec.DictGet(c.pdf, c.r, dict, key)
 	if err != nil {
 		return v, fmt.Errorf("/%s: %w", key, err)
@@ -132,7 +132,7 @@ func (c *ctx) deref(dict ppdf.Value, key string) (ppdf.Value, error) {
 // pageContent returns the page's decoded content stream. /Contents is one
 // stream or an array of them, and an array is one stream cut at arbitrary
 // points — a text operator may straddle the seam — so they concatenate.
-func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
+func pageContent(c *ctx, page piudf.Value) ([]byte, error) {
 	contents, err := c.codec.DictGet(c.pdf, c.r, page, "Contents")
 	if err != nil {
 		return nil, err
@@ -140,7 +140,7 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 	if contents.IsNull() {
 		return nil, nil // A page may legally have no content.
 	}
-	var refs []ppdf.ObjectID
+	var refs []piudf.ObjectID
 	if contents.Tok == piulex.TokR {
 		refs = append(refs, contents.ObjectID())
 	} else {
@@ -151,7 +151,7 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 		if !arr.IsArray() {
 			return nil, fmt.Errorf("/Contents is %v, want a stream or array", arr.Tok)
 		}
-		err = c.codec.ArrayForEach(c.pdf, c.r, arr, func(v ppdf.Value) bool {
+		err = c.codec.ArrayForEach(c.pdf, c.r, arr, func(v piudf.Value) bool {
 			if v.Tok == piulex.TokR {
 				refs = append(refs, v.ObjectID())
 			}
@@ -167,7 +167,7 @@ func pageContent(c *ctx, page ppdf.Value) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolving content %v: %w", ref, err)
 		}
-		rd, err := c.pdf.OpenStream(c.r, v, new(ppdf.Stream), c.codec)
+		rd, err := c.pdf.OpenStream(c.r, v, new(piudf.Stream), c.codec)
 		if err != nil {
 			return nil, fmt.Errorf("opening content %v: %w", ref, err)
 		}

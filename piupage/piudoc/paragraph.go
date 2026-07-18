@@ -1,11 +1,11 @@
-package doc
+package piudoc
 
 import (
 	"image/color"
 	"strconv"
 	"strings"
 
-	canvas "github.com/soypat/piudf/piupage"
+	"github.com/soypat/piudf/piupage"
 )
 
 // Paragraph is wrapped rich text. Text may carry a small markup subset —
@@ -21,7 +21,7 @@ type Paragraph struct {
 // piece is a run of same-style text within a laid-out line.
 type piece struct {
 	text string
-	font canvas.Font
+	font piupage.Font
 	size float64
 	col  color.Color
 }
@@ -51,10 +51,10 @@ func (p *Paragraph) Wrap(availWidth float64) (w, h float64) {
 			cur = pline{}
 			continue
 		}
-		wordW := canvas.StringWidth(a.font, a.word, a.size)
+		wordW := piupage.StringWidth(a.font, a.word, a.size)
 		space := 0.0
 		if len(cur.pieces) > 0 {
-			space = canvas.StringWidth(a.font, " ", a.size)
+			space = piupage.StringWidth(a.font, " ", a.size)
 		}
 		if len(cur.pieces) > 0 && cur.width+space+wordW > avail {
 			lines = append(lines, cur)
@@ -80,7 +80,7 @@ func (p *Paragraph) Wrap(availWidth float64) (w, h float64) {
 }
 
 // Draw paints the wrapped lines with the paragraph's top-left at (x, yTop).
-func (p *Paragraph) Draw(c *canvas.Canvas, x, yTop, availWidth float64) {
+func (p *Paragraph) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
 	if p.lines == nil {
 		p.Wrap(availWidth)
 	}
@@ -104,7 +104,7 @@ func (p *Paragraph) Draw(c *canvas.Canvas, x, yTop, availWidth float64) {
 				c.SetFont(pc.font, pc.size)
 				c.Text(px, base, pc.text, pc.col)
 			}
-			px += canvas.StringWidth(pc.font, pc.text, pc.size)
+			px += piupage.StringWidth(pc.font, pc.text, pc.size)
 		}
 		y -= lineH
 	}
@@ -121,7 +121,7 @@ func maxf(a, b float64) float64 {
 type atom struct {
 	word string
 	brk  bool
-	font canvas.Font
+	font piupage.Font
 	size float64
 	col  color.Color
 }
@@ -191,7 +191,7 @@ func parseAtoms(text string, base Style) []atom {
 				}
 			}
 			if v := attr(tag, "color"); v != "" {
-				cur.col = canvas.HexColor(v)
+				cur.col = piupage.HexColor(v)
 			}
 			stack = append(stack, cur)
 		case tag == "/b" || tag == "/i" || tag == "/font":
@@ -221,7 +221,7 @@ func baseFamily(name string) string {
 }
 
 // resolveFont maps a family plus bold/italic flags to a standard-14 font.
-func resolveFont(family string, bold, ital bool) canvas.Font {
+func resolveFont(family string, bold, ital bool) piupage.Font {
 	var name string
 	switch family {
 	case "Times":
@@ -240,10 +240,10 @@ func resolveFont(family string, bold, ital bool) canvas.Font {
 	default:
 		name = styleName("Helvetica", bold, ital)
 	}
-	if f, ok := canvas.Standard14(name); ok {
+	if f, ok := piupage.Standard14(name); ok {
 		return f
 	}
-	f, _ := canvas.Standard14("Helvetica")
+	f, _ := piupage.Standard14("Helvetica")
 	return f
 }
 

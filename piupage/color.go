@@ -1,11 +1,11 @@
-// Package canvas is an imperative PDF drawing surface: text, lines and
+// package piupage is an imperative PDF drawing surface: text, lines and
 // rectangles on a single page, with color and standard-14 font support. It is
 // the low-level half of a reportlab-style report generator (the flowable layer
 // lives in github.com/soypat/piudf/piupage/piudoc) and emits PDF content-stream
 // operators through a piulex.Emitter into an in-memory buffer.
 //
 // Colors are stdlib image/color values; DeviceRGB is derived from RGBA().
-package canvas
+package piupage
 
 import "image/color"
 

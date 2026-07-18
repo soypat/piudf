@@ -1,9 +1,9 @@
-package doc
+package piudoc
 
 import (
 	"image/color"
 
-	canvas "github.com/soypat/piudf/piupage"
+	"github.com/soypat/piudf/piupage"
 )
 
 // Cell is one table cell: either a bare string (styled by the table's default
@@ -138,7 +138,7 @@ func (t *Table) Wrap(availWidth float64) (w, h float64) {
 }
 
 // Draw paints backgrounds, cell content and lines with the top-left at (x,yTop).
-func (t *Table) Draw(c *canvas.Canvas, x, yTop, availWidth float64) {
+func (t *Table) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
 	if t.heights == nil {
 		t.Wrap(availWidth)
 	}

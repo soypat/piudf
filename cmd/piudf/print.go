@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -15,7 +15,7 @@ const maxSpanPrint = 96
 // readSpan returns the file bytes a span Value addresses. Values are
 // coordinates, so this is the only place bytes are copied, and the copy is
 // the caller's, not the library's.
-func readSpan(c *ctx, v ppdf.Value) ([]byte, error) {
+func readSpan(c *ctx, v piudf.Value) ([]byte, error) {
 	if v.Stm != 0 {
 		return nil, fmt.Errorf("value lives in object stream %d: unsupported", v.Stm)
 	}
@@ -37,7 +37,7 @@ func readSpan(c *ctx, v ppdf.Value) ([]byte, error) {
 // vstr renders v as PDF source. Scalars carry their whole value in the Value
 // itself; a span carries only coordinates, so its text is read back from the
 // file and its coordinates are printed alongside.
-func vstr(c *ctx, v ppdf.Value) string {
+func vstr(c *ctx, v piudf.Value) string {
 	switch v.Tok {
 	case piulex.TokR:
 		return string(v.ObjectID().AppendString(nil))

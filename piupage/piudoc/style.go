@@ -1,8 +1,8 @@
-// Package doc is the flowable layer of a reportlab-style report generator: a
+// package piudoc is the flowable layer of a reportlab-style report generator: a
 // story of Paragraph/Table/Spacer/HRule flowed top-to-bottom into pages and
 // written as a PDF. It is the platypus analogue built on the imperative
 // github.com/soypat/piudf/piupage surface and the piudf Encoder.
-package doc
+package piudoc
 
 import "image/color"
 

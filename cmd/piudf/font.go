@@ -6,7 +6,7 @@ import (
 	"io"
 	"unicode/utf16"
 
-	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -47,7 +47,7 @@ func (f *font) decode(dst []byte, s []byte) []byte {
 // pageFonts builds a decoder per /Font resource name, so a Tf operator can
 // select one. /Resources is inheritable, so a page without one takes its
 // parent's.
-func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
+func pageFonts(c *ctx, page piudf.Value) (map[string]*font, error) {
 	res, err := c.inherited(page, "Resources")
 	if err != nil || res.IsNull() {
 		return nil, err
@@ -63,10 +63,10 @@ func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
 	// one lexer, so resolving inside DictForEach would move the scan.
 	type entry struct {
 		name string
-		id   ppdf.ObjectID
+		id   piudf.ObjectID
 	}
 	var refs []entry
-	err = c.codec.DictForEach(c.pdf, c.r, fontsD, func(k []byte, v ppdf.Value) bool {
+	err = c.codec.DictForEach(c.pdf, c.r, fontsD, func(k []byte, v piudf.Value) bool {
 		if v.Tok == piulex.TokR {
 			refs = append(refs, entry{string(k), v.ObjectID()})
 		}
@@ -88,7 +88,7 @@ func pageFonts(c *ctx, page ppdf.Value) (map[string]*font, error) {
 
 // inherited reads key from dict, walking /Parent when absent. The page tree
 // lets a node hand /Resources and /MediaBox down to its kids.
-func (c *ctx) inherited(dict ppdf.Value, key string) (ppdf.Value, error) {
+func (c *ctx) inherited(dict piudf.Value, key string) (piudf.Value, error) {
 	for depth := 0; depth <= maxPageDepth; depth++ {
 		v, err := c.codec.DictGet(c.pdf, c.r, dict, key)
 		if err != nil {
@@ -99,19 +99,19 @@ func (c *ctx) inherited(dict ppdf.Value, key string) (ppdf.Value, error) {
 		}
 		parent, err := c.codec.DictGet(c.pdf, c.r, dict, "Parent")
 		if err != nil || parent.IsNull() {
-			return ppdf.Value{Tok: piulex.TokNull}, err
+			return piudf.Value{Tok: piulex.TokNull}, err
 		}
 		if dict, err = c.pdf.Deref(c.r, parent, c.codec); err != nil {
 			return dict, err
 		}
 	}
-	return ppdf.Value{}, fmt.Errorf("/Parent chain deeper than %d", maxPageDepth)
+	return piudf.Value{}, fmt.Errorf("/Parent chain deeper than %d", maxPageDepth)
 }
 
 // loadFont reads a font's code-to-text map. /ToUnicode is authoritative and
 // says so explicitly; /Encoding /Differences is the older way and names
 // glyphs, which only map back to text because the names are conventional.
-func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
+func loadFont(c *ctx, id piudf.ObjectID) (*font, error) {
 	fd, err := c.pdf.Resolve(c.r, id, c.codec)
 	if err != nil {
 		return nil, err
@@ -154,9 +154,9 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 	// /Differences is a code followed by the names of the glyphs at that code
 	// onward, repeated: [0 /B /D 65 /a] assigns 0->B, 1->D, 65->a.
 	var code uint32
-	var names []ppdf.Value
+	var names []piudf.Value
 	var codes []uint32
-	err = c.codec.ArrayForEach(c.pdf, c.r, diff, func(v ppdf.Value) bool {
+	err = c.codec.ArrayForEach(c.pdf, c.r, diff, func(v piudf.Value) bool {
 		if n, ok := v.Int(); ok {
 			code = uint32(n)
 			return true
@@ -189,8 +189,8 @@ func loadFont(c *ctx, id ppdf.ObjectID) (*font, error) {
 // readAllStream decodes a whole stream into memory. Fine for a CMap, which is
 // a few hundred bytes; the library hands back a reader precisely so the
 // caller decides this.
-func readAllStream(c *ctx, v ppdf.Value) ([]byte, error) {
-	rd, err := c.pdf.OpenStream(c.r, v, new(ppdf.Stream), c.codec)
+func readAllStream(c *ctx, v piudf.Value) ([]byte, error) {
+	rd, err := c.pdf.OpenStream(c.r, v, new(piudf.Stream), c.codec)
 	if err != nil {
 		return nil, err
 	}

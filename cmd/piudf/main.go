@@ -13,15 +13,15 @@ import (
 	"os"
 	"sort"
 
-	ppdf "github.com/soypat/piudf"
+	"github.com/soypat/piudf"
 )
 
 // ctx is the shared command context: one decoded document and its reader.
 // The reader is held here and passed to every ppdf call; the library never
 // stores it.
 type ctx struct {
-	pdf       *ppdf.PDF
-	codec     *ppdf.Codec
+	pdf       *piudf.PDF
+	codec     *piudf.Codec
 	r         io.ReaderAt
 	size      int64
 	path      string
@@ -91,16 +91,16 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	cfg := ppdf.DecoderConfig{
+	cfg := piudf.DecoderConfig{
 		Buffer:          make([]byte, 8192),
 		MaxLazySections: 4096,
 		MaxDepth:        64,
 	}
-	codec := new(ppdf.Codec)
+	codec := new(piudf.Codec)
 	if err := codec.Configure(cfg); err != nil {
 		fatal(err)
 	}
-	c := &ctx{pdf: new(ppdf.PDF), codec: codec, r: f, size: st.Size(), path: path}
+	c := &ctx{pdf: new(piudf.PDF), codec: codec, r: f, size: st.Size(), path: path}
 	c.decodeErr = c.pdf.Decode(c.r, c.size, c.codec)
 	// Now that the document is indexed it can say what caching its
 	// cross-reference rows costs, which is knowable no earlier. This tool

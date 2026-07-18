@@ -6,7 +6,7 @@ import (
 )
 
 // This is compress/flate's inflate loop, ported to draw every buffer from
-// caller memory (see the package doc). The block state machine, the resumable
+// caller memory (see the package piudoc). The block state machine, the resumable
 // step function, and huffSym are unchanged in behaviour; only the sources of
 // memory differ: bits come from bitReader, output from window, and the Huffman
 // overflow tables from the shared links buffer instead of a per-block make.

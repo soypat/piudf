@@ -1,6 +1,6 @@
-package canvas
+package piupage
 
-import ppdf "github.com/soypat/piudf"
+import "github.com/soypat/piudf"
 
 // Font provides text metrics and byte encoding for one typeface. The
 // standard-14 implementation ([Standard14]) needs no embedded font program; a
@@ -17,7 +17,7 @@ type Font interface {
 	// one byte; an unencodable rune falls back to '?'.
 	Encode(dst []byte, r rune) []byte
 	// writeObjects emits the font's PDF object(s) and returns the font dict id.
-	writeObjects(enc *ppdf.Encoder) (ppdf.ObjectID, error)
+	writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error)
 }
 
 // StringWidth returns the rendered width of s in points at the given size.
@@ -32,7 +32,7 @@ func StringWidth(f Font, s string, size float64) float64 {
 // WriteFont emits f's PDF object(s) into enc and returns the font dictionary's
 // id. It is the exported door onto the unexported Font.writeObjects, so the doc
 // layer can materialize shared font objects.
-func WriteFont(enc *ppdf.Encoder, f Font) (ppdf.ObjectID, error) {
+func WriteFont(enc *piudf.Encoder, f Font) (piudf.ObjectID, error) {
 	return f.writeObjects(enc)
 }
 
