@@ -383,9 +383,9 @@ func (d *Document) writePage(pageID, pagesID piudf.ObjectID, cv *piupage.Canvas,
 	d.enc.DictOpen()
 	d.enc.Name("Font")
 	d.enc.DictOpen()
-	for _, f := range cv.Fonts() {
+	for i, f := range cv.Fonts() {
 		id := fontID[f.BaseName()]
-		d.enc.Name(cv.ResourceName(f))
+		d.enc.NameNum("F", int64(i+1))
 		d.enc.Ref(id.Num, id.Gen)
 	}
 	d.enc.DictClose()

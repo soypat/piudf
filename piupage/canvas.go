@@ -3,7 +3,6 @@ package piupage
 import (
 	"bytes"
 	"image/color"
-	"strconv"
 
 	"github.com/soypat/piudf/piulex"
 )
@@ -15,19 +14,20 @@ import (
 type Canvas struct {
 	emit piulex.Emitter
 	buf  bytes.Buffer
-	// used lists the fonts referenced in first-use order, assigning /F1, /F2 …
-	used []fontUse
+	// used lists the fonts referenced in first-use order. A font's position is
+	// its /Resources name — used[i] is /F(i+1) — so the name is derived where
+	// it is needed rather than stored per entry.
+	used []Font
 	// Current text font/size, applied by Text.
 	curFont Font
 	curSize float64
 	// links records the page's link areas. They are annotations, not content,
 	// so the Canvas only collects them; the page writer emits them.
 	links []Link
-	// enc and fonts are the buffers Text and Fonts hand back. They are grown
-	// to what a page needs and then reused for every page after it, which is
-	// what keeps drawing off the heap once the first page has been laid down.
-	enc   []byte
-	fonts []Font
+	// enc is the buffer Text encodes into. It grows to what a page needs and
+	// is reused for every page after it, which is what keeps drawing off the
+	// heap once the first page has been laid down.
+	enc []byte
 }
 
 // Link is a rectangular area of a page that resolves to a URI when clicked.
@@ -36,12 +36,6 @@ type Canvas struct {
 type Link struct {
 	X, Y, W, H float64
 	URI        string
-}
-
-// fontUse binds a font to the resource name it was assigned on this page.
-type fontUse struct {
-	font Font
-	name string // "F1", "F2", …
 }
 
 // NewCanvas returns a Canvas whose emitter uses scratch as its write-through
@@ -58,40 +52,30 @@ func (c *Canvas) Reset(scratch []byte) {
 	c.used = c.used[:0]
 	c.links = c.links[:0]
 	c.enc = c.enc[:0]
-	c.fonts = c.fonts[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.emit.Reset(&c.buf, scratch)
 }
 
 // SetFont selects f at the given size for subsequent Text calls, registering it
-// in this page's resources.
-func (c *Canvas) SetFont(f Font, size float64) {
+// in this page's resources and returning the /F number it was given.
+func (c *Canvas) SetFont(f Font, size float64) int {
 	c.curFont = f
 	c.curSize = size
-	c.ensure(f)
+	return c.ensure(f)
 }
 
-var fontResNames = [...]string{
-	"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8",
-	"F9", "F10", "F11", "F12", "F13", "F14", "F15", "F16",
-}
-
-// ensure registers f and returns its resource name ("F1"…).
-func (c *Canvas) ensure(f Font) string {
+// ensure registers f and returns its /Resources number. Two fonts sharing a
+// /BaseFont are one resource: the page would otherwise name the same font
+// dictionary twice.
+func (c *Canvas) ensure(f Font) int {
 	for i := range c.used {
-		if c.used[i].font == f || c.used[i].font.BaseName() == f.BaseName() {
-			return c.used[i].name
+		if c.used[i] == f || c.used[i].BaseName() == f.BaseName() {
+			return i + 1
 		}
 	}
-	var name string
-	if n := len(c.used); n < len(fontResNames) {
-		name = fontResNames[n]
-	} else {
-		name = "F" + strconv.Itoa(n+1)
-	}
-	c.used = append(c.used, fontUse{font: f, name: name})
-	return name
+	c.used = append(c.used, f)
+	return len(c.used)
 }
 
 // Text draws s with its baseline origin at (x, y) in the current font and fill
@@ -100,10 +84,10 @@ func (c *Canvas) Text(x, y float64, s string, col color.Color) {
 	if c.curFont == nil {
 		return
 	}
-	name := c.ensure(c.curFont)
+	num := c.ensure(c.curFont)
 	r, g, b := rgb(col)
 	c.emit.Ident("BT")
-	c.emit.Name(name)
+	c.emit.NameNum("F", int64(num))
 	c.emit.Real(c.curSize)
 	c.emit.Ident("Tf")
 	c.emit.Real(r)
@@ -214,27 +198,11 @@ func (c *Canvas) Bytes() []byte {
 	return c.buf.Bytes()
 }
 
-// Fonts returns the fonts referenced on this page, in first-use order. Like
+// Fonts returns the fonts referenced on this page, in first-use order, which
+// is also their naming: the font at index i is this page's /F(i+1). Like
 // [Canvas.Links] the result is the Canvas's own slice, valid until the next
-// call to Fonts or [Canvas.Reset]; copy it to keep it past either.
-func (c *Canvas) Fonts() []Font {
-	c.fonts = c.fonts[:0]
-	for i := range c.used {
-		c.fonts = append(c.fonts, c.used[i].font)
-	}
-	return c.fonts
-}
-
-// ResourceName returns the /Resources font name ("F1"…) assigned to f, or ""
-// if f was not used on this page.
-func (c *Canvas) ResourceName(f Font) string {
-	for i := range c.used {
-		if c.used[i].font == f || c.used[i].font.BaseName() == f.BaseName() {
-			return c.used[i].name
-		}
-	}
-	return ""
-}
+// [Canvas.Reset].
+func (c *Canvas) Fonts() []Font { return c.used }
 
 // Err reports the first emission error, if any.
 func (c *Canvas) Err() error { return c.emit.Err() }

@@ -96,6 +96,11 @@ func (e *Emitter) Int(v int64) {
 	if e.err != nil {
 		return
 	}
+	e.rawint(v)
+	e.needSep = true
+}
+
+func (e *Emitter) rawint(v int64) {
 	if len(e.buf)-e.n < MinEmitBuffer {
 		e.flush()
 		if e.err != nil {
@@ -106,7 +111,6 @@ func (e *Emitter) Int(v int64) {
 	// miscount would fail loudly rather than reallocate behind the caller.
 	b := strconv.AppendInt(e.buf[e.n:e.n:len(e.buf)], v, 10)
 	e.n += len(b)
-	e.needSep = true
 }
 
 // Real emits a real number token. PDF forbids exponent notation, so the value
@@ -129,6 +133,12 @@ func (e *Emitter) Real(f float64) {
 	e.sep()
 	e.raw(b)
 	e.needSep = true
+}
+
+// NameNum emits a name-integer composite name i.e: "F1"
+func (e *Emitter) NameNum(s string, num int64) {
+	e.Name(s)
+	e.rawint(num)
 }
 
 // Name emits /s, escaping as #xx every byte the lexer would not read back as
