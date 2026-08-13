@@ -9,7 +9,7 @@ import (
 
 const testFontPath = "../testdata/DejaVuSansMono.ttf"
 
-func testFontData(t *testing.T) []byte {
+func testFontData(t testing.TB) []byte {
 	t.Helper()
 	b, err := os.ReadFile(testFontPath)
 	if err != nil {

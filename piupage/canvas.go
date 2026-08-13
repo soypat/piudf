@@ -23,6 +23,11 @@ type Canvas struct {
 	// links records the page's link areas. They are annotations, not content,
 	// so the Canvas only collects them; the page writer emits them.
 	links []Link
+	// enc and fonts are the buffers Text and Fonts hand back. They are grown
+	// to what a page needs and then reused for every page after it, which is
+	// what keeps drawing off the heap once the first page has been laid down.
+	enc   []byte
+	fonts []Font
 }
 
 // Link is a rectangular area of a page that resolves to a URI when clicked.
@@ -52,6 +57,8 @@ func (c *Canvas) Reset(scratch []byte) {
 	c.buf.Reset()
 	c.used = c.used[:0]
 	c.links = c.links[:0]
+	c.enc = c.enc[:0]
+	c.fonts = c.fonts[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.emit.Reset(&c.buf, scratch)
@@ -65,6 +72,11 @@ func (c *Canvas) SetFont(f Font, size float64) {
 	c.ensure(f)
 }
 
+var fontResNames = [...]string{
+	"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8",
+	"F9", "F10", "F11", "F12", "F13", "F14", "F15", "F16",
+}
+
 // ensure registers f and returns its resource name ("F1"…).
 func (c *Canvas) ensure(f Font) string {
 	for i := range c.used {
@@ -72,7 +84,12 @@ func (c *Canvas) ensure(f Font) string {
 			return c.used[i].name
 		}
 	}
-	name := "F" + strconv.Itoa(len(c.used)+1)
+	var name string
+	if n := len(c.used); n < len(fontResNames) {
+		name = fontResNames[n]
+	} else {
+		name = "F" + strconv.Itoa(n+1)
+	}
 	c.used = append(c.used, fontUse{font: f, name: name})
 	return name
 }
@@ -114,13 +131,15 @@ func (c *Canvas) TextRight(xRight, y float64, s string, col color.Color) {
 	c.Text(xRight-StringWidth(c.curFont, s, c.curSize), y, s, col)
 }
 
-// encode converts s to the current font's byte codes.
+// encode converts s to the current font's byte codes. The result is the
+// Canvas's own buffer, valid until the next encode: the emitter writes the
+// codes out before Text returns, so nothing outlives the call.
 func (c *Canvas) encode(s string) []byte {
-	dst := make([]byte, 0, len(s))
+	c.enc = c.enc[:0]
 	for _, r := range s {
-		dst = c.curFont.Encode(dst, r)
+		c.enc = c.curFont.Encode(c.enc, r)
 	}
-	return dst
+	return c.enc
 }
 
 // Line strokes a segment from (x0,y0) to (x1,y1) with width w and color col.
@@ -195,13 +214,15 @@ func (c *Canvas) Bytes() []byte {
 	return c.buf.Bytes()
 }
 
-// Fonts returns the fonts referenced on this page, in first-use order.
+// Fonts returns the fonts referenced on this page, in first-use order. Like
+// [Canvas.Links] the result is the Canvas's own slice, valid until the next
+// call to Fonts or [Canvas.Reset]; copy it to keep it past either.
 func (c *Canvas) Fonts() []Font {
-	fs := make([]Font, len(c.used))
+	c.fonts = c.fonts[:0]
 	for i := range c.used {
-		fs[i] = c.used[i].font
+		c.fonts = append(c.fonts, c.used[i].font)
 	}
-	return fs
+	return c.fonts
 }
 
 // ResourceName returns the /Resources font name ("F1"…) assigned to f, or ""
