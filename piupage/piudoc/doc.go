@@ -42,8 +42,7 @@ type PageInfo struct {
 	Num   int // 1-based
 	Total int
 	Size  PageSize
-	// Margins are the frame's margins, which is where running heads and folios
-	// belong: the content area is what the story already filled.
+	// Margins are the frame's margins, which is where running heads and folios.
 	Margins Margins
 }
 
@@ -53,9 +52,8 @@ type Document struct {
 	Size    PageSize
 	Margins Margins
 
-	// Document information, all optional. Title is worth setting even when the
-	// rest is not: with it a viewer titles its window after the document
-	// rather than after whatever the file happens to be called.
+	// Document information is optional:
+
 	Title    string
 	Author   string
 	Subject  string
@@ -66,10 +64,8 @@ type Document struct {
 	// Screen readers use it to pick a voice.
 	Lang string
 
-	// OnPage decorates each page after the story has been flowed onto it, with
-	// the final page count already known — which is what lets a footer say
-	// "page 2 of 7". It draws on the same canvas as the content, so it should
-	// keep to the margins.
+	// OnPage runs after final page count already known to decorate
+	// i.e: "page 2 of 7".
 	OnPage func(c *piupage.Canvas, p PageInfo)
 
 	w       io.Writer
@@ -205,14 +201,9 @@ func (d *Document) flow(story []Flowable) ([]*piupage.Canvas, []mark) {
 	}
 	cur := newPage()
 
-	// unplaced holds bookmarks read but not yet resolved to a destination. A
-	// Bookmark draws nothing, so it is only when the next flowable is actually
-	// drawn that the frame knows which page the reader should be taken to —
-	// resolving it earlier would aim a heading's bookmark at the page before.
+	// unplaced holds bookmarks read but not yet resolved to a destination
 	var unplaced []Bookmark
-	// place resolves every pending bookmark, plus any fl carries itself, to
-	// where fl is about to be drawn. It runs only on the paths that actually
-	// draw: a flowable deferred to the next page has not landed yet.
+	// place resolves every pending bookmark, plus any fl carries itself
 	place := func(fl Flowable) {
 		unplaced = collectBookmarks(fl, unplaced)
 		for _, b := range unplaced {
