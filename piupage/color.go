@@ -12,7 +12,7 @@ import "image/color"
 // Units expressed in PDF points (1/72 inch, the native content-stream unit).
 const (
 	Pt   = 1.0
-	Inch = 72.0
+	Inch = 72.0 * Pt
 	MM   = Inch / 25.4
 	CM   = 10 * MM
 )

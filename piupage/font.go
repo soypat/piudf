@@ -1,6 +1,10 @@
 package piupage
 
-import "github.com/soypat/piudf"
+import (
+	"slices"
+
+	"github.com/soypat/piudf"
+)
 
 // Font provides text metrics and byte encoding for one typeface. The
 // standard-14 implementation ([Standard14]) needs no embedded font program; a
@@ -16,7 +20,15 @@ type Font interface {
 	// Encode appends the font's byte code(s) for r to dst. WinAnsi fonts emit
 	// one byte; an unencodable rune falls back to '?'.
 	Encode(dst []byte, r rune) []byte
+	// hexCodes reports whether encoded text should be written as a hex string.
+	// Multi-byte codes are unreadable either way, and hex keeps the content
+	// stream free of the escaping a literal string would need.
+	hexCodes() bool
+	// has reports whether the font can draw r with a glyph of its own.
+	has(r rune) bool
 	// writeObjects emits the font's PDF object(s) and returns the font dict id.
+	// It is called once, after every page has been drawn, so a font that
+	// embeds a subset of itself knows the full set of glyphs it must carry.
 	writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error)
 }
 
@@ -29,6 +41,21 @@ func StringWidth(f Font, s string, size float64) float64 {
 	return w * size
 }
 
+// MissingGlyphs returns the distinct runes of s that f has no glyph for, in
+// order of first appearance. Those runes still draw — as .notdef, the empty
+// box — so a document that wants to be sure of its typography checks its text
+// against its faces before writing rather than after reading the result.
+func MissingGlyphs(f Font, s string) []rune {
+	var missing []rune
+	for _, r := range s {
+		if f.has(r) || slices.Contains(missing, r) {
+			continue
+		}
+		missing = append(missing, r)
+	}
+	return missing
+}
+
 // WriteFont emits f's PDF object(s) into enc and returns the font dictionary's
 // id. It is the exported door onto the unexported Font.writeObjects, so the doc
 // layer can materialize shared font objects.
@@ -39,7 +66,8 @@ func WriteFont(enc *piudf.Encoder, f Font) (piudf.ObjectID, error) {
 // Standard14 returns one of the built-in PDF fonts by /BaseFont name
 // (WinAnsi-encoded, no embedded program). ok is false for an unknown name. Only
 // the Helvetica family carries real metrics in this first cut; other names
-// resolve with Helvetica widths as a stand-in.
+// resolve with Helvetica widths as a stand-in, so a document that wants a
+// different typeface — and correct measurements for it — wants [TrueType].
 func Standard14(name string) (f Font, ok bool) {
 	switch name {
 	case "Helvetica", "Helvetica-Oblique":

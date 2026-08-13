@@ -20,6 +20,17 @@ type Canvas struct {
 	// Current text font/size, applied by Text.
 	curFont Font
 	curSize float64
+	// links records the page's link areas. They are annotations, not content,
+	// so the Canvas only collects them; the page writer emits them.
+	links []Link
+}
+
+// Link is a rectangular area of a page that resolves to a URI when clicked.
+// It is page furniture rather than drawn content: nothing about a Link changes
+// what the page looks like.
+type Link struct {
+	X, Y, W, H float64
+	URI        string
 }
 
 // fontUse binds a font to the resource name it was assigned on this page.
@@ -40,6 +51,7 @@ func NewCanvas(scratch []byte) *Canvas {
 func (c *Canvas) Reset(scratch []byte) {
 	c.buf.Reset()
 	c.used = c.used[:0]
+	c.links = c.links[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.emit.Reset(&c.buf, scratch)
@@ -84,7 +96,11 @@ func (c *Canvas) Text(x, y float64, s string, col color.Color) {
 	c.emit.Real(x)
 	c.emit.Real(y)
 	c.emit.Ident("Td")
-	c.emit.String(c.encode(s))
+	if c.curFont.hexCodes() {
+		c.emit.HexString(c.encode(s))
+	} else {
+		c.emit.String(c.encode(s))
+	}
 	c.emit.Ident("Tj")
 	c.emit.Ident("ET")
 	c.emit.EOL()
@@ -122,6 +138,37 @@ func (c *Canvas) Line(x0, y0, x1, y1, w float64, col color.Color) {
 	c.emit.Real(x1)
 	c.emit.Real(y1)
 	c.emit.Ident("l")
+	c.emit.Ident("S")
+	c.emit.EOL()
+}
+
+// Link marks the rectangle at (x,y) of size w×h as a hyperlink to uri. An
+// empty uri is ignored, which lets a caller pass through an unset link target
+// without branching.
+func (c *Canvas) Link(x, y, w, h float64, uri string) {
+	if uri == "" {
+		return
+	}
+	c.links = append(c.links, Link{X: x, Y: y, W: w, H: h, URI: uri})
+}
+
+// Links returns the page's link areas in the order they were added.
+func (c *Canvas) Links() []Link { return c.links }
+
+// StrokeRect strokes the outline of the rectangle at (x,y) of size w×h.
+func (c *Canvas) StrokeRect(x, y, w, h, lineWidth float64, col color.Color) {
+	r, g, b := rgb(col)
+	c.emit.Real(r)
+	c.emit.Real(g)
+	c.emit.Real(b)
+	c.emit.Ident("RG")
+	c.emit.Real(lineWidth)
+	c.emit.Ident("w")
+	c.emit.Real(x)
+	c.emit.Real(y)
+	c.emit.Real(w)
+	c.emit.Real(h)
+	c.emit.Ident("re")
 	c.emit.Ident("S")
 	c.emit.EOL()
 }

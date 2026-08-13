@@ -4,7 +4,47 @@
 // github.com/soypat/piudf/piupage surface and the piudf Encoder.
 package piudoc
 
-import "image/color"
+import (
+	"image/color"
+
+	"github.com/soypat/piudf/piupage"
+)
+
+// Family is the set of faces a Style draws from: the markup's <b> and <i>
+// choose among them, so a document names its typography once and the paragraph
+// layer never has to know which faces are built in and which are embedded.
+// A nil face falls back to the nearest one that is set, and a Family with no
+// faces at all falls back to the standard-14 lookup by [Style.Font] name.
+type Family struct {
+	Regular, Bold, Italic, BoldItalic piupage.Font
+}
+
+// face returns the family member for the requested weight and slope.
+func (fam *Family) face(bold, ital bool) piupage.Font {
+	if fam == nil {
+		return nil
+	}
+	var f piupage.Font
+	switch {
+	case bold && ital:
+		f = or(fam.BoldItalic, fam.Bold, fam.Italic)
+	case bold:
+		f = or(fam.Bold, fam.BoldItalic)
+	case ital:
+		f = or(fam.Italic, fam.BoldItalic)
+	}
+	return or(f, fam.Regular, fam.Bold, fam.Italic, fam.BoldItalic)
+}
+
+// or returns the first non-nil font.
+func or(fonts ...piupage.Font) piupage.Font {
+	for _, f := range fonts {
+		if f != nil {
+			return f
+		}
+	}
+	return nil
+}
 
 // Align is horizontal text/content alignment.
 type Align uint8
@@ -29,7 +69,16 @@ const (
 // paragraph or table cell. A zero Color means black; a zero Leading means
 // 1.2*Size.
 type Style struct {
-	Font        string // canvas /BaseFont family, e.g. "Helvetica"; "" => Helvetica
+	// Face is the typeface this style draws with. When nil, Font names one of
+	// the standard-14 built-ins instead.
+	Face *Family
+	Font string // canvas /BaseFont family, e.g. "Helvetica"; "" => Helvetica
+	// Bold and Italic select the weight and slope the style starts in, the
+	// same state <b> and <i> would put it in. They are how a Face-based style
+	// says "set this bold", since with a Family the face is chosen by the
+	// markup rather than named in Font.
+	Bold        bool
+	Italic      bool
 	Size        float64
 	Leading     float64
 	Color       color.Color
@@ -38,6 +87,10 @@ type Style struct {
 	SpaceAfter  float64
 	LeftIndent  float64
 	RightIndent float64
+	// LinkColor paints <a href> spans; nil leaves them in the body color.
+	LinkColor color.Color
+	// LinkUnderline rules a line under <a href> spans.
+	LinkUnderline bool
 }
 
 // leading returns the effective baseline-to-baseline distance.

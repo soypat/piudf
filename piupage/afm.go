@@ -114,6 +114,14 @@ func winansiByte(r rune) (b byte, ok bool) {
 
 func (f *stdFont) BaseName() string { return f.base }
 
+func (f *stdFont) hexCodes() bool { return false }
+
+// has reports whether r has both a WinAnsi code and a width in this face.
+func (f *stdFont) has(r rune) bool {
+	b, ok := winansiByte(r)
+	return ok && f.widths[b] != 0
+}
+
 func (f *stdFont) Width(r rune) float64 {
 	b, ok := winansiByte(r)
 	if !ok {

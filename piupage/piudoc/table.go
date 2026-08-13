@@ -106,7 +106,11 @@ type Table struct {
 	Style     TableStyle
 	// CellStyle is the default text style for bare-string cells.
 	CellStyle Style
-	heights   []float64
+	// RepeatRows is how many leading rows are a header: a table split across
+	// pages reprints them at the top of each continuation, so the reader is
+	// never looking at a column of values whose heading is a page behind.
+	RepeatRows int
+	heights    []float64
 }
 
 const defaultCellPad = 6
@@ -227,6 +231,81 @@ func (t *Table) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
 			}
 		}
 	}
+}
+
+// SplitAt divides the table at a row boundary so its head fits in availHeight,
+// reprinting the header rows atop the tail. A nil head means not even one body
+// row fits and the table should start on the next page.
+func (t *Table) SplitAt(availWidth, availHeight float64) (head, tail Flowable) {
+	t.Wrap(availWidth)
+	var used float64
+	for _, h := range t.heights[:t.repeat()] {
+		used += h
+	}
+	// k is the first row that does not fit; every row before it is drawn now.
+	k := t.repeat()
+	for k < len(t.Rows) && used+t.heights[k] <= availHeight {
+		used += t.heights[k]
+		k++
+	}
+	if k >= len(t.Rows) || k == t.repeat() {
+		return nil, t
+	}
+	return t.slice(0, k, false), t.slice(k, len(t.Rows), true)
+}
+
+// repeat is the header row count, clamped to the rows that exist.
+func (t *Table) repeat() int {
+	return min(max(t.RepeatRows, 0), len(t.Rows))
+}
+
+// slice builds the table over rows [lo,hi), optionally prefixed by the repeated
+// header, with every style op rewritten onto the new row numbering.
+func (t *Table) slice(lo, hi int, withHeader bool) *Table {
+	rep := 0
+	if withHeader {
+		rep = t.repeat()
+	}
+	rows := make([][]Cell, 0, rep+hi-lo)
+	rows = append(rows, t.Rows[:rep]...)
+	rows = append(rows, t.Rows[lo:hi]...)
+	out := &Table{
+		Rows:       rows,
+		ColWidths:  t.ColWidths,
+		CellStyle:  t.CellStyle,
+		RepeatRows: rep,
+	}
+	for _, op := range t.Style.ops {
+		out.Style.ops = append(out.Style.ops, t.remapOp(op, lo, hi, rep)...)
+	}
+	return out
+}
+
+// remapOp rewrites one op's row range for a slice holding rep header rows
+// followed by the original rows [lo,hi). An op may survive as two: one over the
+// reprinted header and one over the body it originally covered.
+func (t *Table) remapOp(op tableOp, lo, hi, rep int) []tableOp {
+	r0, r1 := resolveIdx(op.r0, len(t.Rows)), resolveIdx(op.r1, len(t.Rows))
+	if r0 > r1 {
+		r0, r1 = r1, r0
+	}
+	var out []tableOp
+	emit := func(a, b int) {
+		if a > b {
+			return
+		}
+		o := op
+		o.r0, o.r1 = a, b
+		out = append(out, o)
+	}
+	if rep > 0 {
+		emit(max(r0, 0), min(r1, rep-1))
+	}
+	// Body rows keep their relative order, shifted to sit after the header.
+	if a, b := max(r0, lo), min(r1, hi-1); a <= b {
+		emit(a-lo+rep, b-lo+rep)
+	}
+	return out
 }
 
 // cellFlow returns the flowable for cell (ci,r): its embedded Flowable, or a
