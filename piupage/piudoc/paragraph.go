@@ -227,6 +227,36 @@ type spanStyle struct {
 	ital bool
 }
 
+// parseSpanSize resolves a <font size> attribute against enclosing, the size
+// the span is nested in, and u, the unit the paragraph's style is written in.
+//
+// A bare number is a length in the document's unit, like every other length in
+// this package. Since that unit may be millimetres, in which a readable type
+// size is an unreadable number, two relative forms — "85%" and "0.85em", both
+// ratios of the enclosing size — and one absolute escape, "8pt", let markup be
+// written without knowing what the document is measured in.
+func parseSpanSize(v string, enclosing float64, u piupage.Unit) (float64, bool) {
+	if u == 0 {
+		u = piupage.Pt
+	}
+	num := func(s string) (float64, bool) {
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil && f >= 0
+	}
+	switch {
+	case strings.HasSuffix(v, "%"):
+		f, ok := num(strings.TrimSuffix(v, "%"))
+		return enclosing * f / 100, ok
+	case strings.HasSuffix(v, "em"):
+		f, ok := num(strings.TrimSuffix(v, "em"))
+		return enclosing * f, ok
+	case strings.HasSuffix(v, "pt"):
+		f, ok := num(strings.TrimSuffix(v, "pt"))
+		return u.FromPt(f), ok
+	}
+	return num(v)
+}
+
 // parseAtoms scans text's markup subset into styled word atoms.
 func parseAtoms(text string, base Style) []atom {
 	family := baseFamily(base.family())
@@ -293,7 +323,7 @@ func parseAtoms(text string, base Style) []atom {
 		case strings.HasPrefix(tag, "font"):
 			cur := stack[len(stack)-1]
 			if v := attr(tag, "size"); v != "" {
-				if f, err := strconv.ParseFloat(v, 64); err == nil {
+				if f, ok := parseSpanSize(v, cur.size, base.Unit); ok {
 					cur.size = f
 				}
 			}

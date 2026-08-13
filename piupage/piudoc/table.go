@@ -113,7 +113,11 @@ type Table struct {
 	heights    []float64
 }
 
-const defaultCellPad = 6
+// defaultCellPadEm is the cell padding a table uses when its style sets none,
+// as a fraction of the cell font's em. It is a ratio rather than a length
+// because Wrap is never told the document's unit: at the 10pt CellStyle this
+// package's sample styles use, it is the 6 points it has always been.
+const defaultCellPadEm = 0.6
 
 // Wrap measures row heights against the column grid and reports the table size.
 func (t *Table) Wrap(availWidth float64) (w, h float64) {
@@ -201,9 +205,12 @@ func (t *Table) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
 		}
 		rc0, rr0 := resolveIdx(op.c0, len(t.ColWidths)), resolveIdx(op.r0, len(t.Rows))
 		rc1, rr1 := resolveIdx(op.c1, len(t.ColWidths)), resolveIdx(op.r1, len(t.Rows))
+		// A width of zero is PDF's hairline: the thinnest line the device can
+		// render. It is the one line width that means the same thing in every
+		// unit, which is why the default is not a number of points.
 		lw := op.f
-		if lw <= 0 {
-			lw = 0.5
+		if lw < 0 {
+			lw = 0
 		}
 		switch op.kind {
 		case opLineBelow:
@@ -328,7 +335,8 @@ func (t *Table) cellFlow(ci, r int) Flowable {
 
 // padding resolves the cell's padding, defaulting to defaultCellPad on each side.
 func (t *Table) padding(ci, r int) (pl, pr, pt, pb float64) {
-	pl, pr, pt, pb = defaultCellPad, defaultCellPad, defaultCellPad, defaultCellPad
+	d := defaultCellPadEm * t.CellStyle.Size
+	pl, pr, pt, pb = d, d, d, d
 	for _, op := range t.Style.ops {
 		if op.kind == opPad && t.inRange(op, ci, r) {
 			pl, pr, pt, pb = op.pl, op.pr, op.pt, op.pb

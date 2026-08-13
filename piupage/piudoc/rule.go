@@ -29,8 +29,8 @@ type HRule struct {
 // Wrap reports the rule's height including its surrounding space.
 func (h HRule) Wrap(availWidth float64) (w, height float64) {
 	t := h.Thickness
-	if t <= 0 {
-		t = 1
+	if t < 0 {
+		t = 0 // PDF's hairline, the one width that is unit-independent.
 	}
 	return availWidth, h.SpaceBefore + t + h.SpaceAfter
 }
@@ -38,8 +38,8 @@ func (h HRule) Wrap(availWidth float64) (w, height float64) {
 // Draw strokes the rule across the available width at (x, yTop).
 func (h HRule) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
 	t := h.Thickness
-	if t <= 0 {
-		t = 1
+	if t < 0 {
+		t = 0 // PDF's hairline, the one width that is unit-independent.
 	}
 	w := h.Width
 	if w <= 0 {

@@ -12,9 +12,16 @@ import (
 // content-stream operators into an in-memory buffer through a piulex.Emitter
 // and records which fonts it referenced so the page's /Resources can be built.
 // PDF space has its origin at the bottom-left with y increasing upward.
+//
+// Every length a Canvas is given — coordinates, widths, font sizes — is in the
+// [Unit] it was built with, and is converted to points once, at emission. A
+// caller therefore works in whatever unit suits the drawing and never converts
+// anything itself.
 type Canvas struct {
 	emit piulex.Emitter
 	buf  bytes.Buffer
+	// unit is the length unit this canvas' caller works in.
+	unit Unit
 	// used lists the fonts referenced in first-use order, assigning /F1, /F2 …
 	used []fontUse
 	// Current text font/size, applied by Text.
@@ -28,6 +35,10 @@ type Canvas struct {
 // Link is a rectangular area of a page that resolves to a URI when clicked.
 // It is page furniture rather than drawn content: nothing about a Link changes
 // what the page looks like.
+//
+// Its rectangle is in the canvas' unit, as the caller gave it: an annotation is
+// not content, so unlike everything else a Canvas is told it does not pass
+// through emission here, and whoever writes the annotation converts it.
 type Link struct {
 	X, Y, W, H float64
 	URI        string
@@ -39,15 +50,24 @@ type fontUse struct {
 	name string // "F1", "F2", …
 }
 
-// NewCanvas returns a Canvas whose emitter uses scratch as its write-through
-// window; scratch is caller-owned and must be at least piulex.MinEmitBuffer.
-func NewCanvas(scratch []byte) *Canvas {
-	c := &Canvas{}
+// NewCanvas returns a Canvas measured in u whose emitter uses scratch as its
+// write-through window; scratch is caller-owned and must be at least
+// piulex.MinEmitBuffer. A zero u means [Pt].
+func NewCanvas(scratch []byte, u Unit) *Canvas {
+	if u == 0 {
+		u = Pt
+	}
+	c := &Canvas{unit: u}
 	c.emit.Reset(&c.buf, scratch)
 	return c
 }
 
-// Reset clears the content buffer and font set for reuse on a new page.
+// Unit returns the length unit this canvas is measured in.
+func (c *Canvas) Unit() Unit { return c.unit }
+
+// Reset clears the content buffer and font set for reuse on a new page. The
+// unit is a property of the surface rather than of what was drawn on it, so it
+// survives.
 func (c *Canvas) Reset(scratch []byte) {
 	c.buf.Reset()
 	c.used = c.used[:0]
@@ -57,8 +77,18 @@ func (c *Canvas) Reset(scratch []byte) {
 	c.emit.Reset(&c.buf, scratch)
 }
 
+// emitLength emits v, a length in the canvas' unit, as a content-stream real
+// in points. It is deliberately not named after the token it writes: an
+// operand is either a length and goes through here, or is a pure number — a
+// colour component, an opacity — and goes to c.emit.Real directly, and the two
+// sit side by side in the operator sequences below.
+func (c *Canvas) emitLength(v float64) {
+	c.emit.Real(c.unit.EmitPt(v))
+}
+
 // SetFont selects f at the given size for subsequent Text calls, registering it
-// in this page's resources.
+// in this page's resources. The size is a length like any other, so it is in
+// the canvas' unit: a 9.5pt face on a millimetre canvas is MM.FromPt(9.5).
 func (c *Canvas) SetFont(f Font, size float64) {
 	c.curFont = f
 	c.curSize = size
@@ -87,14 +117,14 @@ func (c *Canvas) Text(x, y float64, s string, col color.Color) {
 	r, g, b := rgb(col)
 	c.emit.Ident("BT")
 	c.emit.Name(name)
-	c.emit.Real(c.curSize)
+	c.emitLength(c.curSize)
 	c.emit.Ident("Tf")
 	c.emit.Real(r)
 	c.emit.Real(g)
 	c.emit.Real(b)
 	c.emit.Ident("rg")
-	c.emit.Real(x)
-	c.emit.Real(y)
+	c.emitLength(x)
+	c.emitLength(y)
 	c.emit.Ident("Td")
 	if c.curFont.hexCodes() {
 		c.emit.HexString(c.encode(s))
@@ -130,13 +160,13 @@ func (c *Canvas) Line(x0, y0, x1, y1, w float64, col color.Color) {
 	c.emit.Real(g)
 	c.emit.Real(b)
 	c.emit.Ident("RG")
-	c.emit.Real(w)
+	c.emitLength(w)
 	c.emit.Ident("w")
-	c.emit.Real(x0)
-	c.emit.Real(y0)
+	c.emitLength(x0)
+	c.emitLength(y0)
 	c.emit.Ident("m")
-	c.emit.Real(x1)
-	c.emit.Real(y1)
+	c.emitLength(x1)
+	c.emitLength(y1)
 	c.emit.Ident("l")
 	c.emit.Ident("S")
 	c.emit.EOL()
@@ -162,12 +192,12 @@ func (c *Canvas) StrokeRect(x, y, w, h, lineWidth float64, col color.Color) {
 	c.emit.Real(g)
 	c.emit.Real(b)
 	c.emit.Ident("RG")
-	c.emit.Real(lineWidth)
+	c.emitLength(lineWidth)
 	c.emit.Ident("w")
-	c.emit.Real(x)
-	c.emit.Real(y)
-	c.emit.Real(w)
-	c.emit.Real(h)
+	c.emitLength(x)
+	c.emitLength(y)
+	c.emitLength(w)
+	c.emitLength(h)
 	c.emit.Ident("re")
 	c.emit.Ident("S")
 	c.emit.EOL()
@@ -180,10 +210,10 @@ func (c *Canvas) FillRect(x, y, w, h float64, col color.Color) {
 	c.emit.Real(g)
 	c.emit.Real(b)
 	c.emit.Ident("rg")
-	c.emit.Real(x)
-	c.emit.Real(y)
-	c.emit.Real(w)
-	c.emit.Real(h)
+	c.emitLength(x)
+	c.emitLength(y)
+	c.emitLength(w)
+	c.emitLength(h)
 	c.emit.Ident("re")
 	c.emit.Ident("f")
 	c.emit.EOL()

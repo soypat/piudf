@@ -77,10 +77,14 @@ type Style struct {
 	// same state <b> and <i> would put it in. They are how a Face-based style
 	// says "set this bold", since with a Family the face is chosen by the
 	// markup rather than named in Font.
-	Bold        bool
-	Italic      bool
-	Size        float64
-	Leading     float64
+	Bold    bool
+	Italic  bool
+	Size    float64
+	Leading float64
+	// Unit is what Size, Leading and the spacings below are expressed in. It
+	// is set by In, and is consulted only to resolve a pt-suffixed size in
+	// markup — everything else here is already in it. The zero value is Pt.
+	Unit        piupage.Unit
 	Color       color.Color
 	Align       Align
 	SpaceBefore float64
@@ -91,6 +95,21 @@ type Style struct {
 	LinkColor color.Color
 	// LinkUnderline rules a line under <a href> spans.
 	LinkUnderline bool
+}
+
+// In converts s, a style whose lengths are in points, to the unit u. It is how
+// a point-flavoured style — the predefined ones below, or one a caller wrote
+// out in the units type is normally set in — is used in a document measured in
+// something else.
+func (s Style) In(u piupage.Unit) Style {
+	s.Unit = u
+	s.Size = u.FromPt(s.Size)
+	s.Leading = u.FromPt(s.Leading)
+	s.SpaceBefore = u.FromPt(s.SpaceBefore)
+	s.SpaceAfter = u.FromPt(s.SpaceAfter)
+	s.LeftIndent = u.FromPt(s.LeftIndent)
+	s.RightIndent = u.FromPt(s.RightIndent)
+	return s
 }
 
 // leading returns the effective baseline-to-baseline distance.

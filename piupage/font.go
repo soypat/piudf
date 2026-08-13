@@ -14,8 +14,10 @@ import (
 type Font interface {
 	// BaseName is the PDF /BaseFont value, e.g. "Helvetica-Bold".
 	BaseName() string
-	// Width is the advance of r at 1pt — a fraction of the em — so that
-	// StringWidth(f, s, size) == sum(Width(r)) * size.
+	// Width is the advance of r as a fraction of the em, so that
+	// StringWidth(f, s, size) == sum(Width(r)) * size. Being a ratio it
+	// carries no unit of its own, which is what lets a size in any unit
+	// produce a width in that same unit.
 	Width(r rune) float64
 	// Encode appends the font's byte code(s) for r to dst. WinAnsi fonts emit
 	// one byte; an unencodable rune falls back to '?'.
@@ -32,7 +34,9 @@ type Font interface {
 	writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error)
 }
 
-// StringWidth returns the rendered width of s in points at the given size.
+// StringWidth returns the rendered width of s at the given size, in whatever
+// unit that size is expressed in: the advances it sums are em fractions, so
+// the size is the only thing carrying a unit and it passes straight through.
 func StringWidth(f Font, s string, size float64) float64 {
 	var w float64
 	for _, r := range s {

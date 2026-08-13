@@ -179,7 +179,7 @@ func TestKeepTogetherMovesRatherThanOrphan(t *testing.T) {
 // finished file is a PDF with as many pages as the story needed.
 func TestBuildFlowsAcrossPages(t *testing.T) {
 	var buf bytes.Buffer
-	d := New(&buf, A4, Margins{Left: 50, Right: 50, Top: 50, Bottom: 50})
+	d := New(&buf, piupage.Pt, A4, Margins{Left: 50, Right: 50, Top: 50, Bottom: 50})
 	d.Title = "Flow — test"
 	var pages []PageInfo
 	d.OnPage = func(_ *piupage.Canvas, p PageInfo) { pages = append(pages, p) }
@@ -245,4 +245,72 @@ func equalf(a, b []float64) bool {
 		}
 	}
 	return true
+}
+
+// TestUnitEquivalence is the property the unit machinery exists to have: the
+// same document, described in three different units, is the same PDF. The
+// story is written once in points and restated in each unit, so any length the
+// layout forgot to keep relative — a padding, a rule, a default — shows up as
+// a byte difference in the file rather than as a subtly wrong page.
+func TestUnitEquivalence(t *testing.T) {
+	build := func(u piupage.Unit) []byte {
+		var buf bytes.Buffer
+		st := testStyle.In(u)
+		d := New(&buf, u, A4.In(u), Margins{
+			Left:   u.FromPt(50),
+			Right:  u.FromPt(50),
+			Top:    u.FromPt(50),
+			Bottom: u.FromPt(50),
+		})
+		d.Title = "Unit equivalence"
+		var tblStyle TableStyle
+		tblStyle.LineBelow(0, 0, -1, 0, u.FromPt(0.8), nil).
+			Pad(0, 0, -1, -1, u.FromPt(3), u.FromPt(3), u.FromPt(2), u.FromPt(2))
+		story := []Flowable{
+			Bookmark{Title: "Top"},
+			P(strings.Repeat("word ", 200), st),
+			Spacer{H: u.FromPt(10)},
+			HRule{Thickness: u.FromPt(1.2)},
+			&Table{
+				ColWidths: []float64{u.FromPt(200), u.FromPt(200)},
+				CellStyle: st,
+				Style:     tblStyle,
+				Rows: [][]Cell{
+					{TextCell("left"), TextCell("right")},
+					{FlowCell(P(`a <a href="http://x.example">link</a> here`, st)), TextCell("b")},
+				},
+			},
+			// A second table sets no padding and no line width, so the
+			// defaults are on the path too: those are the lengths with no
+			// caller to get their unit from, and the easiest to leave absolute.
+			&Table{
+				ColWidths: []float64{u.FromPt(150), u.FromPt(150)},
+				CellStyle: st,
+				Rows:      [][]Cell{{TextCell("default"), TextCell("padding")}},
+			},
+			HRule{}, // Default thickness, likewise.
+			PageBreak{},
+			P("last page", st),
+		}
+		if err := d.Build(story); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+
+	want := build(piupage.Pt)
+	for _, u := range []struct {
+		name string
+		unit piupage.Unit
+	}{
+		{"MM", piupage.MM},
+		{"CM", piupage.CM},
+		{"Inch", piupage.Inch},
+	} {
+		got := build(u.unit)
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s document differs from the same document in points (%d vs %d bytes)",
+				u.name, len(got), len(want))
+		}
+	}
 }

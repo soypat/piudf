@@ -32,6 +32,11 @@ var (
 	Letter = PageSize{612, 792}
 )
 
+// In converts p, a size in points, to the unit u.
+func (p PageSize) In(u piupage.Unit) PageSize {
+	return PageSize{W: u.FromPt(p.W), H: u.FromPt(p.H)}
+}
+
 // Margins are the page margins in points.
 type Margins struct {
 	Left, Right, Top, Bottom float64
@@ -50,6 +55,9 @@ type PageInfo struct {
 // Document is the flowable frame plus PDF writer, the reportlab
 // SimpleDocTemplate analogue.
 type Document struct {
+	// Unit is the length unit every number in this document is expressed in,
+	// including Size, Margins and every Style size. A zero Unit means points.
+	Unit    piupage.Unit
 	Size    PageSize
 	Margins Margins
 
@@ -79,8 +87,19 @@ type Document struct {
 
 // New returns a Document that will write to w with the given page size and
 // margins.
-func New(w io.Writer, size PageSize, m Margins) *Document {
-	return &Document{Size: size, Margins: m, w: w, scratch: make([]byte, 512)}
+func New(w io.Writer, u piupage.Unit, size PageSize, m Margins) *Document {
+	if u == 0 {
+		u = piupage.Pt
+	}
+	return &Document{Unit: u, Size: size, Margins: m, w: w, scratch: make([]byte, 512)}
+}
+
+// unit returns the document's length unit, defaulting to points.
+func (d *Document) unit() piupage.Unit {
+	if d.Unit == 0 {
+		return piupage.Pt
+	}
+	return d.Unit
 }
 
 // mark is a bookmark that has been placed: the frame records where the story
@@ -197,7 +216,7 @@ func (d *Document) flow(story []Flowable) ([]*piupage.Canvas, []mark) {
 		pageTop  float64
 	)
 	newPage := func() *piupage.Canvas {
-		cv := piupage.NewCanvas(make([]byte, 512))
+		cv := piupage.NewCanvas(make([]byte, 512), d.unit())
 		canvases = append(canvases, cv)
 		cursorY = d.Size.H - d.Margins.Top
 		pageTop = cursorY
@@ -315,6 +334,7 @@ func collectBookmarks(fl Flowable, dst []Bookmark) []Bookmark {
 
 // writePage emits one page's content stream, link annotations and page dict.
 func (d *Document) writePage(pageID, pagesID piudf.ObjectID, cv *piupage.Canvas, fontID map[string]piudf.ObjectID) error {
+	u := d.unit()
 	content := d.enc.NewID()
 	body := cv.Bytes()
 	d.enc.BeginObject(content)
@@ -341,10 +361,10 @@ func (d *Document) writePage(pageID, pagesID piudf.ObjectID, cv *piupage.Canvas,
 		d.enc.Name("Link")
 		d.enc.Name("Rect")
 		d.enc.ArrayOpen()
-		d.enc.Real(ln.X)
-		d.enc.Real(ln.Y)
-		d.enc.Real(ln.X + ln.W)
-		d.enc.Real(ln.Y + ln.H)
+		d.enc.Real(u.EmitPt(ln.X))
+		d.enc.Real(u.EmitPt(ln.Y))
+		d.enc.Real(u.EmitPt(ln.X + ln.W))
+		d.enc.Real(u.EmitPt(ln.Y + ln.H))
 		d.enc.ArrayClose()
 		// A zero-width border: the link is styled by the text under it, not by
 		// the box every viewer used to draw around it.
@@ -375,8 +395,8 @@ func (d *Document) writePage(pageID, pagesID piudf.ObjectID, cv *piupage.Canvas,
 	d.enc.ArrayOpen()
 	d.enc.Int(0)
 	d.enc.Int(0)
-	d.enc.Real(d.Size.W)
-	d.enc.Real(d.Size.H)
+	d.enc.Real(u.EmitPt(d.Size.W))
+	d.enc.Real(u.EmitPt(d.Size.H))
 	d.enc.ArrayClose()
 	d.enc.Name("Contents")
 	d.enc.Ref(content.Num, content.Gen)
@@ -523,7 +543,7 @@ func (d *Document) writeOutline(marks []mark, pageIDs []piudf.ObjectID) piudf.Ob
 		d.enc.Ref(pageIDs[page].Num, pageIDs[page].Gen)
 		d.enc.Name("XYZ")
 		d.enc.Real(0)
-		d.enc.Real(it.y)
+		d.enc.Real(d.unit().EmitPt(it.y))
 		d.enc.Null()
 		d.enc.ArrayClose()
 		d.enc.DictClose()
