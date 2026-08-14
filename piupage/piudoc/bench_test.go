@@ -1,4 +1,4 @@
-package piudoc2
+package piudoc
 
 import (
 	"io"

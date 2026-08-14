@@ -2,22 +2,23 @@ package piudoc
 
 import (
 	"image/color"
+	"io"
 
 	"github.com/soypat/piudf/piupage"
 )
 
 // Cell is one table cell: either a bare string (styled by the table's default
-// cell style) or an embedded Flowable such as a Paragraph or nested Table.
+// cell style) or an embedded Drawer such as a Paragraph or nested Table.
 type Cell struct {
 	Text string
-	Flow Flowable
+	Flow Drawer
 }
 
 // TextCell wraps a string as a cell.
 func TextCell(s string) Cell { return Cell{Text: s} }
 
-// FlowCell wraps a flowable as a cell.
-func FlowCell(f Flowable) Cell { return Cell{Flow: f} }
+// FlowCell wraps a drawer as a cell.
+func FlowCell(d Drawer) Cell { return Cell{Flow: d} }
 
 // tableOpKind enumerates the typed TableStyle operations.
 type tableOpKind uint8
@@ -50,6 +51,8 @@ type tableOp struct {
 type TableStyle struct {
 	ops []tableOp
 }
+
+func (ts *TableStyle) Reset() { ts.ops = ts.ops[:0] }
 
 // Align sets horizontal alignment over the cell range.
 func (ts *TableStyle) Align(c0, r0, c1, r1 int, a Align) *TableStyle {
@@ -99,139 +102,208 @@ func (ts *TableStyle) Grid(c0, r0, c1, r1 int, w float64, col color.Color) *Tabl
 	return ts
 }
 
-// Table lays cells on a fixed column grid; row heights derive from content.
+// Table lays cells on a fixed column grid; row heights derive from content. A
+// table that outgrows its page continues on the next one, breaking between rows.
 type Table struct {
 	Rows      [][]Cell
 	ColWidths []float64 // points
 	Style     TableStyle
 	// CellStyle is the default text style for bare-string cells.
 	CellStyle Style
-	heights   []float64
+	// cell is the paragraph a bare-string cell is drawn as, reused across every
+	// such cell so that a table of text allocates nothing.
+	cell Paragraph
 }
 
 const defaultCellPad = 6
 
-// Wrap measures row heights against the column grid and reports the table size.
-func (t *Table) Wrap(availWidth float64) (w, h float64) {
-	t.heights = make([]float64, len(t.Rows))
-	var total, width float64
-	for _, cw := range t.ColWidths {
-		width += cw
+// Draw paints the table one row at a time, moving to the next page whenever the
+// row at hand no longer fits.
+//
+// A row's height is the tallest of its cells, and it must be known before any
+// of them is painted: the row's background goes down first, and a cell's
+// vertical alignment is measured against it. Since a content stream paints in
+// order and cannot be reordered after the fact, each cell is drawn onto the page
+// and retracted with [Measure] to learn its extent, then drawn again where the
+// finished row geometry puts it.
+func (t *Table) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
+	ncol := len(t.ColWidths)
+	if ncol == 0 {
+		return 0, yTop, nil
 	}
+	y := yTop
 	for r := range t.Rows {
-		var rowH float64
-		for ci := range t.Rows[r] {
-			if ci >= len(t.ColWidths) {
-				break
-			}
-			pl, pr, pt, pb := t.padding(ci, r)
-			fl := t.cellFlow(ci, r)
-			_, ch := fl.Wrap(t.ColWidths[ci] - pl - pr)
-			if hh := ch + pt + pb; hh > rowH {
-				rowH = hh
-			}
+		rowH, err := t.rowHeight(dst[adv:], f, r)
+		if err != nil {
+			return adv, y, err
 		}
-		t.heights[r] = rowH
-		total += rowH
+		// A row taller than a whole page cannot be helped by breaking, so it
+		// overflows rather than looping onto page after page.
+		if y-rowH < f.Bottom && y < f.Top {
+			adv++
+			if adv >= len(dst) {
+				return adv, y, io.ErrShortBuffer
+			}
+			y = f.Top
+		}
+		err = t.drawRow(dst[adv:], f, r, y, rowH)
+		if err != nil {
+			return adv, y, err
+		}
+		y -= rowH
 	}
-	return width, total
+	return adv, y, nil
 }
 
-// Draw paints backgrounds, cell content and lines with the top-left at (x,yTop).
-func (t *Table) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
-	if t.heights == nil {
-		t.Wrap(availWidth)
-	}
-	// Column left edges and row top edges.
-	colLeft := make([]float64, len(t.ColWidths)+1)
-	colLeft[0] = x
-	for i, cw := range t.ColWidths {
-		colLeft[i+1] = colLeft[i] + cw
-	}
-	rowTop := make([]float64, len(t.Rows)+1)
-	rowTop[0] = yTop
-	for r := range t.Rows {
-		rowTop[r+1] = rowTop[r] - t.heights[r]
-	}
-
-	// Pass 1: backgrounds.
-	for r := range t.Rows {
-		for ci := range t.Rows[r] {
-			if ci >= len(t.ColWidths) {
-				break
-			}
-			if col, ok := t.background(ci, r); ok {
-				c.FillRect(colLeft[ci], rowTop[r+1], t.ColWidths[ci], t.heights[r], col)
-			}
+// rowHeight measures row r: the tallest cell in it, padding included.
+func (t *Table) rowHeight(dst []piupage.Canvas, f Frame, r int) (rowH float64, err error) {
+	for ci := range t.Rows[r] {
+		if ci >= len(t.ColWidths) {
+			break
+		}
+		pl, pr, pt, pb := t.padding(ci, r)
+		h, err := Measure(dst, t.cellDrawer(ci, r), t.cellFrame(f, ci, pl, pr), f.Top)
+		if err != nil {
+			return 0, err
+		}
+		if hh := h + pt + pb; hh > rowH {
+			rowH = hh
 		}
 	}
+	return rowH, nil
+}
 
-	// Pass 2: content.
-	for r := range t.Rows {
-		for ci := range t.Rows[r] {
-			if ci >= len(t.ColWidths) {
-				break
-			}
-			pl, pr, pt, pb := t.padding(ci, r)
-			cw := t.ColWidths[ci] - pl - pr
-			fl := t.cellFlow(ci, r)
-			_, ch := fl.Wrap(cw)
-			inner := t.heights[r] - pt - pb
-			top := rowTop[r] - pt
-			switch t.valign(ci, r) {
-			case Middle:
-				top -= (inner - ch) / 2
-			case Bottom:
-				top -= inner - ch
-			}
-			fl.Draw(c, colLeft[ci]+pl, top, cw)
+// drawRow paints row r onto dst[0] with its top edge at top: backgrounds first,
+// then cell content, then the rules that cross it.
+func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64) error {
+	cv := &dst[0]
+	rowBot := top - rowH
+
+	x := f.X
+	for ci := range t.Rows[r] {
+		if ci >= len(t.ColWidths) {
+			break
 		}
+		if col, ok := t.background(ci, r); ok {
+			cv.FillRect(x, rowBot, t.ColWidths[ci], rowH, col)
+		}
+		x += t.ColWidths[ci]
 	}
 
-	// Pass 3: lines.
+	x = f.X
+	for ci := range t.Rows[r] {
+		if ci >= len(t.ColWidths) {
+			break
+		}
+		pl, pr, pt, pb := t.padding(ci, r)
+		cf := t.cellFrame(f, ci, pl, pr)
+		cf.X = x + pl
+		dr := t.cellDrawer(ci, r)
+		cellTop := top - pt
+		// Only a vertically aligned cell needs its own height; a top-aligned one
+		// starts at the row's top edge whatever its extent.
+		if v := t.valign(ci, r); v != Top {
+			h, err := Measure(dst, dr, cf, cellTop)
+			if err != nil {
+				return err
+			}
+			inner := rowH - pt - pb
+			if v == Middle {
+				cellTop -= (inner - h) / 2
+			} else {
+				cellTop -= inner - h
+			}
+		}
+		if _, _, err := dr.Draw(dst[:1], cf, cellTop); err != nil {
+			return err
+		}
+		x += t.ColWidths[ci]
+	}
+
+	t.drawRules(cv, f, r, top, rowBot)
+	return nil
+}
+
+// drawRules strokes the parts of the table's line directives that fall on row r.
+// Working a row at a time is what lets a box or grid spanning a page break come
+// out closed on both pages.
+func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) {
+	ncol, nrow := len(t.ColWidths), len(t.Rows)
 	for _, op := range t.Style.ops {
 		switch op.kind {
 		case opLineBelow, opLineAbove, opBox, opGrid:
 		default:
 			continue
 		}
-		rc0, rr0 := resolveIdx(op.c0, len(t.ColWidths)), resolveIdx(op.r0, len(t.Rows))
-		rc1, rr1 := resolveIdx(op.c1, len(t.ColWidths)), resolveIdx(op.r1, len(t.Rows))
+		c0, c1 := resolveIdx(op.c0, ncol), resolveIdx(op.c1, ncol)
+		r0, r1 := resolveIdx(op.r0, nrow), resolveIdx(op.r1, nrow)
+		if c0 > c1 {
+			c0, c1 = c1, c0
+		}
+		if r0 > r1 {
+			r0, r1 = r1, r0
+		}
+		if r < r0 || r > r1 {
+			continue
+		}
 		lw := op.f
 		if lw <= 0 {
 			lw = 0.5
 		}
+		left, right := t.colLeft(f, c0), t.colLeft(f, c1+1)
 		switch op.kind {
 		case opLineBelow:
-			for r := rr0; r <= rr1; r++ {
-				c.Line(colLeft[rc0], rowTop[r+1], colLeft[rc1+1], rowTop[r+1], lw, op.col)
-			}
+			cv.Line(left, bot, right, bot, lw, op.col)
 		case opLineAbove:
-			for r := rr0; r <= rr1; r++ {
-				c.Line(colLeft[rc0], rowTop[r], colLeft[rc1+1], rowTop[r], lw, op.col)
-			}
+			cv.Line(left, top, right, top, lw, op.col)
 		case opBox, opGrid:
-			left, right := colLeft[rc0], colLeft[rc1+1]
-			topY, botY := rowTop[rr0], rowTop[rr1+1]
-			c.Line(left, topY, right, topY, lw, op.col)
-			c.Line(left, botY, right, botY, lw, op.col)
-			c.Line(left, topY, left, botY, lw, op.col)
-			c.Line(right, topY, right, botY, lw, op.col)
+			if r == r0 {
+				cv.Line(left, top, right, top, lw, op.col)
+			}
+			if r == r1 {
+				cv.Line(left, bot, right, bot, lw, op.col)
+			}
+			cv.Line(left, top, left, bot, lw, op.col)
+			cv.Line(right, top, right, bot, lw, op.col)
 			if op.kind == opGrid {
-				for cc := rc0 + 1; cc <= rc1; cc++ {
-					c.Line(colLeft[cc], topY, colLeft[cc], botY, lw, op.col)
+				for cc := c0 + 1; cc <= c1; cc++ {
+					x := t.colLeft(f, cc)
+					cv.Line(x, top, x, bot, lw, op.col)
 				}
-				for r := rr0 + 1; r <= rr1; r++ {
-					c.Line(left, rowTop[r], right, rowTop[r], lw, op.col)
+				if r > r0 {
+					cv.Line(left, top, right, top, lw, op.col)
 				}
 			}
 		}
 	}
 }
 
-// cellFlow returns the flowable for cell (ci,r): its embedded Flowable, or a
-// Paragraph built from its text with the resolved alignment.
-func (t *Table) cellFlow(ci, r int) Flowable {
+// cellFrame is the box a cell's content is laid out in: its column less its
+// horizontal padding, and unbounded vertically — a cell is measured against the
+// row it will size, never against the page, so it must not try to break.
+func (t *Table) cellFrame(f Frame, ci int, pl, pr float64) Frame {
+	return Frame{
+		X:      t.colLeft(f, ci) + pl,
+		Width:  t.ColWidths[ci] - pl - pr,
+		Top:    f.Top,
+		Bottom: noBreak,
+	}
+}
+
+// colLeft returns the x of column ci's left edge, ci == len(ColWidths) being the
+// table's right edge. It is walked rather than tabulated so that drawing a table
+// needs no scratch of its own.
+func (t *Table) colLeft(f Frame, ci int) float64 {
+	x := f.X
+	for i := 0; i < ci && i < len(t.ColWidths); i++ {
+		x += t.ColWidths[i]
+	}
+	return x
+}
+
+// cellDrawer returns the drawer for cell (ci,r): its embedded Drawer, or the
+// table's reusable paragraph loaded with the cell's text.
+func (t *Table) cellDrawer(ci, r int) Drawer {
 	cell := t.Rows[r][ci]
 	if cell.Flow != nil {
 		if p, ok := cell.Flow.(*Paragraph); ok {
@@ -244,7 +316,9 @@ func (t *Table) cellFlow(ci, r int) Flowable {
 		st = Normal
 	}
 	st.Align = t.align(ci, r)
-	return P(cell.Text, st)
+	t.cell.Text = cell.Text
+	t.cell.Style = st
+	return &t.cell
 }
 
 // padding resolves the cell's padding, defaulting to defaultCellPad on each side.
