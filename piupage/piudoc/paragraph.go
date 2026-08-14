@@ -2,6 +2,7 @@ package piudoc
 
 import (
 	"image/color"
+	"io"
 	"strconv"
 	"strings"
 
@@ -10,12 +11,14 @@ import (
 
 // Paragraph is wrapped rich text. Text may carry a small markup subset —
 // <b>, <i>, <br/>, <font size= color=> — with unknown tags ignored. Style
-// supplies the defaults; lines are filled by Wrap and consumed by Draw.
+// supplies the defaults.
 type Paragraph struct {
-	Text   string
-	Style  Style
-	lines  []pline
-	availW float64
+	Text  string
+	Style Style
+	// atoms and line are scratch reused across draws: the words the markup
+	// parses to, and the one line currently being filled.
+	atoms []atom
+	line  []piece
 }
 
 // piece is a run of same-style text within a laid-out line.
@@ -26,88 +29,94 @@ type piece struct {
 	col  color.Color
 }
 
-// pline is one laid-out line.
-type pline struct {
-	pieces  []piece
-	width   float64
-	maxSize float64
-}
-
 // P constructs a Paragraph from text and a style.
 func P(text string, s Style) *Paragraph { return &Paragraph{Text: text, Style: s} }
 
-// Wrap parses the markup and greedily breaks the text to availWidth, reporting
-// the size the paragraph will occupy (including SpaceBefore/After).
-func (p *Paragraph) Wrap(availWidth float64) (w, h float64) {
-	p.availW = availWidth
-	avail := availWidth - p.Style.LeftIndent - p.Style.RightIndent
-	atoms := parseAtoms(p.Text, p.Style)
+// Draw breaks the text greedily to the frame's width and paints it from yTop
+// down, continuing onto further pages as it fills them.
+func (p *Paragraph) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
+	avail := f.Width - p.Style.LeftIndent - p.Style.RightIndent
+	if avail <= 0 {
+		return 0, yTop, nil
+	}
+	p.atoms = parseAtoms(p.Text, p.Style, p.atoms[:0])
+	p.line = p.line[:0]
 
-	var lines []pline
-	cur := pline{}
-	for _, a := range atoms {
+	y := yTop - p.Style.SpaceBefore
+	var lineW, maxSize float64
+	for _, a := range p.atoms {
 		if a.brk {
-			lines = append(lines, cur)
-			cur = pline{}
+			adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+			if err != nil {
+				return adv, y, err
+			}
+			lineW, maxSize = 0, 0
 			continue
 		}
 		wordW := piupage.StringWidth(a.font, a.word, a.size)
 		space := 0.0
-		if len(cur.pieces) > 0 {
+		if len(p.line) > 0 {
 			space = piupage.StringWidth(a.font, " ", a.size)
 		}
-		if len(cur.pieces) > 0 && cur.width+space+wordW > avail {
-			lines = append(lines, cur)
-			cur = pline{}
-			space = 0
+		if len(p.line) > 0 && lineW+space+wordW > avail {
+			adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+			if err != nil {
+				return adv, y, err
+			}
+			lineW, maxSize, space = 0, 0, 0
 		}
 		if space > 0 {
-			cur.pieces = append(cur.pieces, piece{" ", a.font, a.size, a.col})
-			cur.width += space
+			p.line = append(p.line, piece{" ", a.font, a.size, a.col})
+			lineW += space
 		}
-		cur.pieces = append(cur.pieces, piece{a.word, a.font, a.size, a.col})
-		cur.width += wordW
-		if a.size > cur.maxSize {
-			cur.maxSize = a.size
+		p.line = append(p.line, piece{a.word, a.font, a.size, a.col})
+		lineW += wordW
+		if a.size > maxSize {
+			maxSize = a.size
 		}
 	}
-	lines = append(lines, cur)
-	p.lines = lines
-
-	lineH := p.Style.leading()
-	h = float64(len(lines))*lineH + p.Style.SpaceBefore + p.Style.SpaceAfter
-	return availWidth, h
+	adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+	if err != nil {
+		return adv, y, err
+	}
+	return adv, y - p.Style.SpaceAfter, nil
 }
 
-// Draw paints the wrapped lines with the paragraph's top-left at (x, yTop).
-func (p *Paragraph) Draw(c *piupage.Canvas, x, yTop, availWidth float64) {
-	if p.lines == nil {
-		p.Wrap(availWidth)
-	}
+// emitLine paints the line assembled in p.line at the cursor, moving to the
+// next page first if the line no longer fits on this one. It reports the page
+// and cursor the paragraph continues from, and empties p.line.
+func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, lineW, maxSize float64) (int, float64, error) {
 	lineH := p.Style.leading()
-	x0 := x + p.Style.LeftIndent
-	avail := p.availW - p.Style.LeftIndent - p.Style.RightIndent
-	y := yTop - p.Style.SpaceBefore
-	for _, ln := range p.lines {
-		ascent := 0.8 * maxf(ln.maxSize, p.Style.Size)
-		base := y - ascent
-		startX := x0
-		switch p.Style.Align {
-		case Right:
-			startX = x0 + avail - ln.width
-		case Center:
-			startX = x0 + (avail-ln.width)/2
+	// A line that does not fit moves to the next page — unless the cursor is
+	// already at the top of one, in which case no amount of breaking will help
+	// and the line overflows rather than looping forever.
+	if y-lineH < f.Bottom && y < f.Top {
+		adv++
+		if adv >= len(dst) {
+			return adv, y, io.ErrShortBuffer
 		}
-		px := startX
-		for _, pc := range ln.pieces {
-			if pc.text != " " {
-				c.SetFont(pc.font, pc.size)
-				c.Text(px, base, pc.text, pc.col)
-			}
-			px += piupage.StringWidth(pc.font, pc.text, pc.size)
-		}
-		y -= lineH
+		y = f.Top
 	}
+	cv := &dst[adv]
+	x0 := f.X + p.Style.LeftIndent
+	startX := x0
+	switch p.Style.Align {
+	case Right:
+		startX = x0 + avail - lineW
+	case Center:
+		startX = x0 + (avail-lineW)/2
+	}
+	base := y - 0.8*maxf(maxSize, p.Style.Size)
+	px := startX
+	for _, pc := range p.line {
+		if pc.text != " " {
+			cv.SetFont(pc.font, pc.size)
+			cv.Text(px, base, pc.text, pc.col)
+		}
+		px += piupage.StringWidth(pc.font, pc.text, pc.size)
+	}
+	p.line = p.line[:0]
+	return adv, y - lineH, nil
 }
 
 func maxf(a, b float64) float64 {
@@ -134,8 +143,11 @@ type spanStyle struct {
 	ital bool
 }
 
-// parseAtoms scans text's markup subset into styled word atoms.
-func parseAtoms(text string, base Style) []atom {
+// parseAtoms scans text's markup subset into styled word atoms, appending to
+// dst so a caller can reuse its buffer. The style stack is kept in a local
+// array and the words are substrings of text, so a paragraph whose markup
+// nests no deeper than eight spans parses without allocating.
+func parseAtoms(text string, base Style, dst []atom) []atom {
 	family := baseFamily(base.family())
 	top := spanStyle{
 		size: base.Size,
@@ -143,38 +155,30 @@ func parseAtoms(text string, base Style) []atom {
 		bold: strings.Contains(base.family(), "Bold"),
 		ital: strings.Contains(base.family(), "Oblique") || strings.Contains(base.family(), "Italic"),
 	}
-	stack := []spanStyle{top}
-	var atoms []atom
-
-	emit := func(s string) {
-		cur := stack[len(stack)-1]
-		f := resolveFont(family, cur.bold, cur.ital)
-		for _, word := range strings.Fields(unescape(s)) {
-			atoms = append(atoms, atom{word: word, font: f, size: cur.size, col: cur.col})
-		}
-	}
+	var stackArr [8]spanStyle
+	stack := append(stackArr[:0], top)
 
 	for i := 0; i < len(text); {
 		if text[i] != '<' {
-			j := strings.IndexByte(text[i:], '<')
-			if j < 0 {
-				emit(text[i:])
-				break
+			end := len(text)
+			if j := strings.IndexByte(text[i:], '<'); j >= 0 {
+				end = i + j
 			}
-			emit(text[i : i+j])
-			i += j
+			dst = appendWords(dst, text[i:end], stack[len(stack)-1], family)
+			i = end
 			continue
 		}
 		k := strings.IndexByte(text[i:], '>')
 		if k < 0 {
-			emit(text[i:])
+			// An unterminated tag is not markup, it is text.
+			dst = appendWords(dst, text[i:], stack[len(stack)-1], family)
 			break
 		}
 		tag := strings.TrimSpace(text[i+1 : i+k])
 		i += k + 1
 		switch {
 		case tag == "br" || tag == "br/" || tag == "br /":
-			atoms = append(atoms, atom{brk: true})
+			dst = append(dst, atom{brk: true})
 		case tag == "b":
 			cur := stack[len(stack)-1]
 			cur.bold = true
@@ -200,16 +204,45 @@ func parseAtoms(text string, base Style) []atom {
 			}
 		}
 	}
-	return atoms
+	return dst
 }
 
-// unescape resolves the handful of XML entities the markup may carry.
+// appendWords appends each whitespace-separated word of s as an atom styled by
+// cur. The words are substrings of s, so text carrying no entity to unescape
+// costs one atom per word and nothing else.
+func appendWords(dst []atom, s string, cur spanStyle, family string) []atom {
+	s = unescape(s)
+	f := resolveFont(family, cur.bold, cur.ital)
+	for i := 0; i < len(s); {
+		for i < len(s) && isSpace(s[i]) {
+			i++
+		}
+		j := i
+		for j < len(s) && !isSpace(s[j]) {
+			j++
+		}
+		if j > i {
+			dst = append(dst, atom{word: s[i:j], font: f, size: cur.size, col: cur.col})
+		}
+		i = j
+	}
+	return dst
+}
+
+func isSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
+}
+
+// entities resolves the handful of XML entities the markup may carry. It is
+// stateless and shared: a Replacer is safe for concurrent use.
+var entities = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&#160;", " ")
+
+// unescape resolves s's entities, returning s itself when it carries none.
 func unescape(s string) string {
 	if !strings.ContainsRune(s, '&') {
 		return s
 	}
-	r := strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">", "&#160;", " ")
-	return r.Replace(s)
+	return entities.Replace(s)
 }
 
 // baseFamily strips a weight/style suffix, e.g. "Helvetica-Bold" -> "Helvetica".
@@ -222,41 +255,48 @@ func baseFamily(name string) string {
 
 // resolveFont maps a family plus bold/italic flags to a standard-14 font.
 func resolveFont(family string, bold, ital bool) piupage.Font {
-	var name string
-	switch family {
-	case "Times":
-		switch {
-		case bold && ital:
-			name = "Times-BoldItalic"
-		case bold:
-			name = "Times-Bold"
-		case ital:
-			name = "Times-Italic"
-		default:
-			name = "Times-Roman"
-		}
-	case "Courier":
-		name = styleName("Courier", bold, ital)
-	default:
-		name = styleName("Helvetica", bold, ital)
-	}
-	if f, ok := piupage.Standard14(name); ok {
+	if f, ok := piupage.Standard14(styleName(family, bold, ital)); ok {
 		return f
 	}
 	f, _ := piupage.Standard14("Helvetica")
 	return f
 }
 
-func styleName(base string, bold, ital bool) string {
+// styleName is the /BaseFont name for a family at a weight and slant. The names
+// are spelled out rather than concatenated so that resolving a font allocates
+// nothing.
+func styleName(family string, bold, ital bool) string {
+	switch family {
+	case "Times":
+		switch {
+		case bold && ital:
+			return "Times-BoldItalic"
+		case bold:
+			return "Times-Bold"
+		case ital:
+			return "Times-Italic"
+		}
+		return "Times-Roman"
+	case "Courier":
+		switch {
+		case bold && ital:
+			return "Courier-BoldOblique"
+		case bold:
+			return "Courier-Bold"
+		case ital:
+			return "Courier-Oblique"
+		}
+		return "Courier"
+	}
 	switch {
 	case bold && ital:
-		return base + "-BoldOblique"
+		return "Helvetica-BoldOblique"
 	case bold:
-		return base + "-Bold"
+		return "Helvetica-Bold"
 	case ital:
-		return base + "-Oblique"
+		return "Helvetica-Oblique"
 	}
-	return base
+	return "Helvetica"
 }
 
 // attr extracts name="value" (or name='value') from a tag body; "" if absent.
