@@ -52,7 +52,7 @@ var emitOps = []emitOp{
 	{"real", func(e *Emitter) { e.Real(0.5) }, []tokLit{{TokReal, "0.5"}}},
 	{"negreal", func(e *Emitter) { e.Real(-1.25) }, []tokLit{{TokReal, "-1.25"}}},
 	{"name", func(e *Emitter) { e.Name("Type") }, []tokLit{{TokName, "Type"}}},
-	{"string", func(e *Emitter) { e.String([]byte("hi")) }, []tokLit{{TokString, "hi"}}},
+	{"string", func(e *Emitter) { e.StringBytes([]byte("hi")) }, []tokLit{{TokString, "hi"}}},
 	{"hexstring", func(e *Emitter) { e.HexString([]byte{0xde, 0xad}) }, []tokLit{{TokHexString, "\xde\xad"}}},
 	{"true", func(e *Emitter) { e.Bool(true) }, []tokLit{{TokTrue, "true"}}},
 	{"false", func(e *Emitter) { e.Bool(false) }, []tokLit{{TokFalse, "false"}}},
@@ -115,7 +115,7 @@ func TestEmitterStringRoundTrip(t *testing.T) {
 		if err := e.Reset(&out, buf[:]); err != nil {
 			t.Fatal(err)
 		}
-		e.String(want)
+		e.StringBytes(want)
 		if err := e.Flush(); err != nil {
 			t.Fatal(err)
 		}
@@ -337,7 +337,7 @@ func TestEmitterAllocs(t *testing.T) {
 		e.Ref(5, 0)
 		e.DictClose()
 		e.Ident("BT")
-		e.String(payload)
+		e.StringBytes(payload)
 		e.Ident("Tj")
 		e.Raw(payload)
 		e.EOL()

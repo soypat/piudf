@@ -70,7 +70,8 @@ func (d *Document) Build(story []Flowable) error {
 		pageTop  float64
 	)
 	newPage := func() *piupage.Canvas {
-		cv := piupage.NewCanvas(make([]byte, 512))
+		cv := new(piupage.Canvas)
+		cv.Reset(make([]byte, 512))
 		canvases = append(canvases, cv)
 		cursorY = d.Size.H - d.Margins.Top
 		pageTop = cursorY
@@ -138,9 +139,9 @@ func (d *Document) Build(story []Flowable) error {
 		d.enc.DictOpen()
 		d.enc.Name("Font")
 		d.enc.DictOpen()
-		for _, f := range cv.Fonts() {
+		for i, f := range cv.Fonts() {
 			id := fontID[f.BaseName()]
-			d.enc.Name(cv.ResourceName(f))
+			d.enc.NameNum("F", int64(i+1))
 			d.enc.Ref(id.Num, id.Gen)
 		}
 		d.enc.DictClose()
@@ -173,11 +174,11 @@ func (d *Document) Build(story []Flowable) error {
 		d.enc.DictOpen()
 		if d.Title != "" {
 			d.enc.Name("Title")
-			d.enc.String([]byte(d.Title))
+			d.enc.StringBytes([]byte(d.Title))
 		}
 		if d.Author != "" {
 			d.enc.Name("Author")
-			d.enc.String([]byte(d.Author))
+			d.enc.StringBytes([]byte(d.Author))
 		}
 		d.enc.DictClose()
 		d.enc.EndObject()

@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"unsafe"
 )
 
 var (
@@ -96,16 +97,7 @@ func (e *Emitter) Int(v int64) {
 	if e.err != nil {
 		return
 	}
-	if len(e.buf)-e.n < MinEmitBuffer {
-		e.flush()
-		if e.err != nil {
-			return
-		}
-	}
-	// Appending into the buffer's own free space: capacity is clamped so a
-	// miscount would fail loudly rather than reallocate behind the caller.
-	b := strconv.AppendInt(e.buf[e.n:e.n:len(e.buf)], v, 10)
-	e.n += len(b)
+	e.rawint(v)
 	e.needSep = true
 }
 
@@ -131,6 +123,12 @@ func (e *Emitter) Real(f float64) {
 	e.needSep = true
 }
 
+// NameNum emits a name-integer composite name i.e: "F1"
+func (e *Emitter) NameNum(s string, num int64) {
+	e.Name(s)
+	e.rawint(num)
+}
+
 // Name emits /s, escaping as #xx every byte the lexer would not read back as
 // part of a name.
 func (e *Emitter) Name(s string) {
@@ -153,9 +151,10 @@ func (e *Emitter) Name(s string) {
 // escaped, and so are CR and NUL: the lexer normalizes end-of-line inside a
 // string and PDF whitespace includes NUL, so escaping is what makes the bytes
 // round-trip exactly.
-func (e *Emitter) String(s []byte) {
+func (e *Emitter) String(s string) {
 	e.wbyte('(')
-	for _, b := range s {
+	for i := range len(s) {
+		b := s[i]
 		switch b {
 		case '\\', '(', ')':
 			e.wbyte('\\')
@@ -174,6 +173,11 @@ func (e *Emitter) String(s []byte) {
 	}
 	e.wbyte(')')
 	e.needSep = false
+}
+
+// StringBytes wraps [Emitter.String] with a bytes value.
+func (e *Emitter) StringBytes(s []byte) {
+	e.String(unsafe.String(&s[0], len(s)))
 }
 
 // HexString emits <hex digits of s>.
@@ -319,6 +323,19 @@ func (e *Emitter) wbyte(b byte) {
 	}
 	e.buf[e.n] = b
 	e.n++
+}
+
+func (e *Emitter) rawint(v int64) {
+	if len(e.buf)-e.n < MinEmitBuffer {
+		e.flush()
+		if e.err != nil {
+			return
+		}
+	}
+	// Appending into the buffer's own free space: capacity is clamped so a
+	// miscount would fail loudly rather than reallocate behind the caller.
+	b := strconv.AppendInt(e.buf[e.n:e.n:len(e.buf)], v, 10)
+	e.n += len(b)
 }
 
 func (e *Emitter) raw(b []byte) {

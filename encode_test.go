@@ -104,7 +104,7 @@ func buildFreshDoc(t *testing.T, contents []byte, compress bool) (doc []byte, ro
 	e.BeginObject(info)
 	e.DictOpen()
 	e.Name("Title")
-	e.String([]byte("piudf test"))
+	e.StringBytes([]byte("piudf test"))
 	e.DictClose()
 	e.EndObject()
 
