@@ -41,11 +41,14 @@ func main() {
 	smallBold := doc.Style{Font: "Helvetica-Bold", Size: 8.5, Leading: 11.5, Color: GREY}
 	tot := doc.Style{Font: "Helvetica", Size: 12, Leading: 15, Color: DARK}
 	start := time.Now()
-	d := doc.New(f, doc.A4, doc.Margins{Left: 22 * mm, Right: 22 * mm, Top: 20 * mm, Bottom: 20 * mm})
-	d.Title = "Commercial Invoice 0001-2026"
-	d.Author = "Jane Doe"
+	d := &doc.Doc{
+		Size:    doc.A4,
+		Margins: doc.Margins{Left: 22 * mm, Right: 22 * mm, Top: 20 * mm, Bottom: 20 * mm},
+		Title:   "Commercial Invoice 0001-2026",
+		Author:  "Jane Doe",
+	}
 
-	var story []doc.Flowable
+	var story []doc.Drawer
 
 	// Header: title + invoice meta.
 	var metaStyle doc.TableStyle
@@ -161,7 +164,11 @@ func main() {
 		"Export of services rendered to a foreign customer. "+
 			"Not subject to local VAT — exportación de servicios.", small))
 
-	if err := d.Build(story); err != nil {
+	// The document owns no memory of its own: the pages it may use, their
+	// content buffers and the encoder's are all supplied here.
+	const maxPages = 4
+	pages := make([]canvas.Canvas, maxPages)
+	if err := d.Build(f, pages, story, make([]byte, 4096), make([]byte, maxPages*4096)); err != nil {
 		fatal(err)
 	}
 	fmt.Println("wrote", out, "in", time.Since(start).Round(time.Microsecond))

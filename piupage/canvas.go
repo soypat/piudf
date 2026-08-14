@@ -24,7 +24,14 @@ type Canvas struct {
 	links []Link
 	// Text encodes
 	enc []byte
+	// ctm is the transform in effect and stack the ones q has saved.
+	ctm   Matrix
+	stack [32]Matrix // PDF 1.7 supports 32 level nesting.
+	depth int
 }
+
+// maxGDepth is the graphics state nesting Canvas admits. See Canvas.stack.
+const maxGDepth = 32
 
 // Link is a undrawn rectangular area of a page that resolves to a URI when clicked.
 type Link struct {
@@ -40,6 +47,8 @@ type Mark struct {
 	links   int
 	curFont Font
 	curSize float64
+	ctm     Matrix
+	depth   int
 }
 
 // Mark records the canvas's current state so a later [Canvas.Rewind] can
@@ -49,6 +58,7 @@ func (c *Canvas) Mark() Mark {
 	return Mark{
 		n: c.buf.Len(), fonts: len(c.used), links: len(c.links),
 		curFont: c.curFont, curSize: c.curSize,
+		ctm: c.ctm, depth: c.depth,
 	}
 }
 
@@ -65,17 +75,85 @@ func (c *Canvas) Rewind(m Mark) {
 	c.links = c.links[:m.links]
 	c.curFont = m.curFont
 	c.curSize = m.curSize
+	c.ctm = m.ctm
+	c.depth = m.depth
 }
 
 // Reset clears the content buffer and font set for reuse on a new page.
-func (c *Canvas) Reset(scratch []byte) error {
+func (c *Canvas) Reset(emitScratch []byte) error {
 	c.buf.Reset()
 	c.used = c.used[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
-	return c.emit.Reset(&c.buf, scratch)
+	c.ctm = Identity()
+	c.depth = 0
+	return c.emit.Reset(&c.buf, emitScratch)
 }
+
+// Save pushes the graphics state level — transform, clip, colors and line parameters
+// — and returns a token restoring it. It is PDF's q operator.
+func (c *Canvas) Save() StateLevel {
+	if c.depth >= maxGDepth {
+		c.emit.Fail(errGDepth)
+		return StateLevel{depth: c.depth}
+	}
+	c.stack[c.depth] = c.ctm
+	c.depth++
+	c.emit.Ident("q")
+	c.emit.EOL()
+	return StateLevel{depth: c.depth - 1}
+}
+
+// Restore unwinds the graphics state to what it was when s was taken, emitting
+// PDF's Q operator for each level it pops. Restoring to a token already
+// restored, or one from another canvas, does nothing.
+func (c *Canvas) Restore(s StateLevel) {
+	if s.depth < 0 || s.depth >= c.depth {
+		return
+	}
+	for c.depth > s.depth {
+		c.depth--
+		c.ctm = c.stack[c.depth]
+		c.emit.Ident("Q")
+	}
+	c.emit.EOL()
+}
+
+// StateLevel is a saved graphics state, taken by [Canvas.Save] and unwound to by
+// [Canvas.Restore]. A StateLevel is invalidated by [Canvas.Reset].
+type StateLevel struct{ depth int }
+
+// Transform concatenates m onto the current transform, so that subsequent
+// coordinates are read in the space m describes. It is PDF's cm operator, and
+// like it the effect lasts until the enclosing [Canvas.Save] is restored.
+func (c *Canvas) Transform(m Matrix) {
+	c.ctm = m.Mul(c.ctm)
+	c.emit.Real(m.A)
+	c.emit.Real(m.B)
+	c.emit.Real(m.C)
+	c.emit.Real(m.D)
+	c.emit.Real(m.E)
+	c.emit.Real(m.F)
+	c.emit.Ident("cm")
+	c.emit.EOL()
+}
+
+// Translate moves the origin of user space to (tx, ty).
+func (c *Canvas) Translate(tx, ty float64) { c.Transform(mattranslate(tx, ty)) }
+
+// Scale scales user space about its origin.
+func (c *Canvas) Scale(sx, sy float64) { c.Transform(matscale(sx, sy)) }
+
+// Rotate rotates user space counterclockwise about its origin by rad radians.
+func (c *Canvas) Rotate(rad float64) { c.Transform(matrotate(rad)) }
+
+// CTM returns the transform in effect, mapping user space to page space.
+func (c *Canvas) CTM() Matrix { return c.ctm }
+
+// DeviceXY maps a point from the current user space to page space, which is
+// where a page's annotations and media box are measured.
+func (c *Canvas) DeviceXY(x, y float64) (float64, float64) { return c.ctm.Apply(x, y) }
 
 // SetFont selects f at the given size for subsequent Text calls, registering it
 // in this page's resources.
@@ -180,7 +258,15 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	if uri == "" {
 		return
 	}
-	c.links = append(c.links, Link{X: x, Y: y, W: w, H: h, URI: uri})
+	// An annotation is measured in page space and knows nothing of the
+	// transform the content was drawn under
+	x0, y0 := c.ctm.Apply(x, y)
+	x1, y1 := c.ctm.Apply(x+w, y)
+	x2, y2 := c.ctm.Apply(x+w, y+h)
+	x3, y3 := c.ctm.Apply(x, y+h)
+	lo, hi := min(x0, x1, x2, x3), max(x0, x1, x2, x3)
+	bot, top := min(y0, y1, y2, y3), max(y0, y1, y2, y3)
+	c.links = append(c.links, Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: uri})
 }
 
 // Links returns the page's link areas in the order they were added.
@@ -213,5 +299,14 @@ func (c *Canvas) Bytes() []byte {
 // Fonts returns the fonts referenced on this page, in first-use order.
 func (c *Canvas) Fonts() []Font { return c.used }
 
-// Err reports the first emission error, if any.
-func (c *Canvas) Err() error { return c.emit.Err() }
+// Err reports the first emission error, if any, and an unrestored [Canvas.Save]
+// once the page is complete.
+func (c *Canvas) Err() error {
+	if err := c.emit.Err(); err != nil {
+		return err
+	}
+	if c.depth != 0 {
+		return errUnclosed
+	}
+	return nil
+}

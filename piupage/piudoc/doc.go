@@ -227,6 +227,9 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 	d.pageIDs = append(d.pageIDs, make([]piudf.ObjectID, nCanv)...)
 	for icv := range nCanv {
 		cv := &dst[icv]
+		if err := cv.Err(); err != nil {
+			return nCanv, nStories, err
+		}
 		content := d.enc.NewID()
 		body := cv.Bytes()
 		d.enc.BeginObject(content)
