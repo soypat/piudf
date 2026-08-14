@@ -177,7 +177,7 @@ func (e *Emitter) String(s string) {
 
 // StringBytes wraps [Emitter.String] with a bytes value.
 func (e *Emitter) StringBytes(s []byte) {
-	e.String(unsafe.String(&s[0], len(s)))
+	e.String(unsafe.String(unsafe.SliceData(s), len(s)))
 }
 
 // HexString emits <hex digits of s>.

@@ -41,17 +41,32 @@ func WriteFont(enc *piudf.Encoder, f Font) (piudf.ObjectID, error) {
 // the Helvetica family carries real metrics in this first cut; other names
 // resolve with Helvetica widths as a stand-in.
 func Standard14(name string) (f Font, ok bool) {
-	switch name {
-	case "Helvetica", "Helvetica-Oblique":
-		return &stdFont{base: name, widths: &helveticaWidths}, true
-	case "Helvetica-Bold", "Helvetica-BoldOblique":
-		return &stdFont{base: name, widths: &helveticaBoldWidths}, true
-	case "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
-		"Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
-		"Symbol", "ZapfDingbats":
-		return &stdFont{base: name, widths: &helveticaWidths}, true
+	for i := range std14 {
+		if std14[i].base == name {
+			return &std14[i], true
+		}
 	}
 	return nil, false
+}
+
+// std14 holds the built-in fonts as singletons so that resolving one costs
+// nothing and two resolutions of the same name compare equal as interface
+// values, which is what [Canvas.ensure] keys a page's resources on.
+var std14 = [14]stdFont{
+	{base: "Helvetica", widths: &helveticaWidths},
+	{base: "Helvetica-Oblique", widths: &helveticaWidths},
+	{base: "Helvetica-Bold", widths: &helveticaBoldWidths},
+	{base: "Helvetica-BoldOblique", widths: &helveticaBoldWidths},
+	{base: "Times-Roman", widths: &helveticaWidths},
+	{base: "Times-Bold", widths: &helveticaWidths},
+	{base: "Times-Italic", widths: &helveticaWidths},
+	{base: "Times-BoldItalic", widths: &helveticaWidths},
+	{base: "Courier", widths: &helveticaWidths},
+	{base: "Courier-Bold", widths: &helveticaWidths},
+	{base: "Courier-Oblique", widths: &helveticaWidths},
+	{base: "Courier-BoldOblique", widths: &helveticaWidths},
+	{base: "Symbol", widths: &helveticaWidths},
+	{base: "ZapfDingbats", widths: &helveticaWidths},
 }
 
 // stdFont is a built-in (non-embedded) Type1 font backed by an AFM width table
