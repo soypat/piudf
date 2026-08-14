@@ -32,20 +32,49 @@ type Link struct {
 	URI        string
 }
 
-// fontUse binds a font to the resource name it was assigned on this page.
-type fontUse struct {
-	font Font
-	name string // "F1", "F2", …
+// Mark is a position in a Canvas's content stream, taken by [Canvas.Mark] and
+// retracted to by [Canvas.Rewind]. A Mark is invalidated by [Canvas.Reset].
+type Mark struct {
+	n       int
+	fonts   int
+	links   int
+	curFont Font
+	curSize float64
+}
+
+// Mark records the canvas's current state so a later [Canvas.Rewind] can
+// retract everything drawn after it.
+func (c *Canvas) Mark() Mark {
+	c.emit.Flush()
+	return Mark{
+		n: c.buf.Len(), fonts: len(c.used), links: len(c.links),
+		curFont: c.curFont, curSize: c.curSize,
+	}
+}
+
+// Rewind discards every operator, font reference, and link recorded since m was
+// taken. Passing a Mark from a different canvas or one taken before a
+// [Canvas.Reset] is a programming error and does nothing.
+func (c *Canvas) Rewind(m Mark) {
+	c.emit.Flush()
+	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) {
+		return
+	}
+	c.buf.Truncate(m.n)
+	c.used = c.used[:m.fonts]
+	c.links = c.links[:m.links]
+	c.curFont = m.curFont
+	c.curSize = m.curSize
 }
 
 // Reset clears the content buffer and font set for reuse on a new page.
-func (c *Canvas) Reset(scratch []byte) {
+func (c *Canvas) Reset(scratch []byte) error {
 	c.buf.Reset()
 	c.used = c.used[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
-	c.emit.Reset(&c.buf, scratch)
+	return c.emit.Reset(&c.buf, scratch)
 }
 
 // SetFont selects f at the given size for subsequent Text calls, registering it
