@@ -40,6 +40,26 @@ func BenchmarkParagraphMeasure(b *testing.B) {
 	}
 }
 
+func BenchmarkTableDraw(b *testing.B) {
+	var cv [1]piupage.Canvas
+	buf := make([]byte, 16384)
+	f := Frame{X: 72, Width: 450, Top: 770, Bottom: 72}
+	rows := make([][]Cell, 12)
+	for i := range rows {
+		rows[i] = []Cell{TextCell("left"), TextCell("a middle column"), TextCell("42.00")}
+	}
+	t := &Table{Rows: rows, ColWidths: []float64{150, 200, 100}}
+	t.Style.Grid(0, 0, -1, -1, 0.5, nil).Background(0, 0, -1, 0, nil).Valign(0, 0, -1, -1, Middle)
+	b.ReportAllocs()
+	for b.Loop() {
+		cv[0].Reset(buf)
+		_, _, err := t.Draw(cv[:], f, f.Top)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkDocBuild(b *testing.B) {
 	const npage = 8
 	dst := make([]piupage.Canvas, npage)
