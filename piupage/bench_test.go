@@ -33,6 +33,69 @@ func BenchmarkCanvasPage(b *testing.B) {
 	}
 }
 
+func BenchmarkPathRecord(b *testing.B) {
+	var p Path
+	ops, pts := make([]byte, 0, 64), make([]float64, 0, 256)
+	b.ReportAllocs()
+	for b.Loop() {
+		p.Reset(ops, pts)
+		p.MoveTo(0, 0)
+		for i := range 10 {
+			p.CubicTo(float64(i), 1, 2, 3, 4, 5)
+			p.QuadTo(1, 2, 3, 4)
+		}
+		p.Close()
+		if p.Err() != nil {
+			b.Fatal(p.Err())
+		}
+	}
+}
+
+func BenchmarkPathPaint(b *testing.B) {
+	var p Path
+	p.MoveTo(10, 10)
+	for i := range 20 {
+		p.CubicTo(float64(i), 1, 2, 3, 4, 5)
+	}
+	p.Close()
+	pen := Pen{Color: color.Black, Width: 2, Cap: RoundCap, Dash: []float64{4, 2}}
+	// color.White is a Gray16 value, not an interface, so naming it inside the
+	// loop would box it on every call and measure that instead.
+	var fill color.Color = color.White
+
+	var c Canvas
+	scratch := make([]byte, 4096)
+	c.Reset(scratch)
+	b.ReportAllocs()
+	for b.Loop() {
+		c.Reset(scratch)
+		s := c.Save()
+		c.Translate(72, 720)
+		c.Rotate(0.3)
+		c.Clip(&p)
+		c.FillStroke(&p, fill, pen)
+		c.Restore(s)
+		c.Bytes()
+	}
+}
+
+func BenchmarkCanvasMarkRewind(b *testing.B) {
+	f, _ := Standard14("Helvetica")
+	var c Canvas
+	scratch := make([]byte, 4096)
+	c.Reset(scratch)
+	b.ReportAllocs()
+	for b.Loop() {
+		m := c.Mark()
+		s := c.Save()
+		c.Translate(10, 10)
+		c.SetFont(f, 10)
+		c.Text(0, 0, benchLine, color.Black)
+		c.Restore(s)
+		c.Rewind(m)
+	}
+}
+
 // benchLine is text a report might actually carry: mixed case, punctuation and
 // accents, which is what makes the encoding path do work.
 const benchLine = "The quick brown fox jumps over the lazy dog — résumé, café, 0123456789."

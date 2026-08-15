@@ -97,16 +97,15 @@ type Doc struct {
 	fonts             []piupage.Font
 	fontids           []piudf.ObjectID
 	pageIDs           []piudf.ObjectID
+	// annots is scratch: the link annotations of the page being written.
+	annots []piudf.ObjectID
 }
 type PageSize struct {
 	W, H float64
 }
 
-// Common page sizes.
-var (
-	A4     = PageSize{595.276, 841.890}
-	Letter = PageSize{612, 792}
-)
+func SizeLetter() PageSize { return PageSize{612, 792} }
+func SizeA4() PageSize     { return PageSize{595.276, 841.890} }
 
 type Margins struct {
 	Left, Right, Top, Bottom float64
@@ -133,6 +132,7 @@ func (d *Doc) Reset(w io.Writer, encBuf []byte) (err error) {
 	d.fonts = d.fonts[:0]
 	d.fontids = d.fontids[:0]
 	d.marks = d.marks[:0]
+	d.annots = d.annots[:0]
 	return nil
 }
 
@@ -227,6 +227,9 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 	d.pageIDs = append(d.pageIDs, make([]piudf.ObjectID, nCanv)...)
 	for icv := range nCanv {
 		cv := &dst[icv]
+		if err := cv.Err(); err != nil {
+			return nCanv, nStories, err
+		}
 		content := d.enc.NewID()
 		body := cv.Bytes()
 		d.enc.BeginObject(content)
@@ -240,6 +243,19 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		}
 		d.enc.EndStreamPayload()
 		d.enc.EndObject()
+
+		// Annotations are separate objects the page dictionary points at, and
+		// BeginObject pairs cannot nest, so they have to be written before the
+		// page is opened — the same shape the content stream just followed.
+		d.annots = d.annots[:0]
+		for _, ln := range cv.Links() {
+			id, err := piupage.WriteLink(&d.enc, ln)
+			if err != nil {
+				return nCanv, nStories, err
+			}
+			d.annots = append(d.annots, id)
+		}
+
 		d.pageIDs[pageOff+icv] = d.enc.NewID()
 		d.enc.BeginObject(d.pageIDs[pageOff+icv])
 		d.enc.DictOpen()
@@ -256,6 +272,16 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		d.enc.ArrayClose()
 		d.enc.Name("Contents")
 		d.enc.Ref(content.Num, content.Gen)
+		// An empty /Annots is legal but is noise on the pages that carry no
+		// link, which is most of them.
+		if len(d.annots) > 0 {
+			d.enc.Name("Annots")
+			d.enc.ArrayOpen()
+			for _, id := range d.annots {
+				d.enc.Ref(id.Num, id.Gen)
+			}
+			d.enc.ArrayClose()
+		}
 		d.enc.Name("Resources")
 		d.enc.DictOpen()
 		d.enc.Name("Font")

@@ -7,18 +7,17 @@ import (
 	"github.com/soypat/piudf/piupage"
 )
 
-// Cell is one table cell: either a bare string (styled by the table's default
-// cell style) or an embedded Drawer such as a Paragraph or nested Table.
+// Cell is one table cell: either bare text (styled by the table's default cell
+// style) or an embedded Drawer such as a Paragraph or nested Table. The text is
+// caller-owned and read in place, on the same terms as [Paragraph.Text].
 type Cell struct {
-	Text string
-	Flow Drawer
+	Text   []byte
+	Drawer Drawer
 }
 
-// TextCell wraps a string as a cell.
-func TextCell(s string) Cell { return Cell{Text: s} }
-
-// FlowCell wraps a drawer as a cell.
-func FlowCell(d Drawer) Cell { return Cell{Flow: d} }
+// TextCell wraps a string as a cell, converting once here so that drawing the
+// table never has to. A caller with a buffer of its own sets [Cell.Text].
+func TextCell(s string) Cell { return Cell{Text: []byte(s)} }
 
 // tableOpKind enumerates the typed TableStyle operations.
 type tableOpKind uint8
@@ -305,11 +304,11 @@ func (t *Table) colLeft(f Frame, ci int) float64 {
 // table's reusable paragraph loaded with the cell's text.
 func (t *Table) cellDrawer(ci, r int) Drawer {
 	cell := t.Rows[r][ci]
-	if cell.Flow != nil {
-		if p, ok := cell.Flow.(*Paragraph); ok {
+	if cell.Drawer != nil {
+		if p, ok := cell.Drawer.(*Paragraph); ok {
 			p.Style.Align = t.align(ci, r)
 		}
-		return cell.Flow
+		return cell.Drawer
 	}
 	st := t.CellStyle
 	if st.Size == 0 {

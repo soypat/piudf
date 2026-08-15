@@ -149,7 +149,7 @@ func TestParagraphSplitsAcrossPages(t *testing.T) {
 
 func TestDocBuildPages(t *testing.T) {
 	var buf bytes.Buffer
-	d := &Doc{Size: A4, Margins: Margins{72, 72, 72, 72}, Title: "t", Author: "a"}
+	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}, Title: "t", Author: "a"}
 	story := []Drawer{
 		P("first", Heading1),
 		Spacer{H: 12},
@@ -181,7 +181,7 @@ func TestDocBuildPages(t *testing.T) {
 }
 
 func TestDocBuildReuse(t *testing.T) {
-	d := &Doc{Size: A4, Margins: Margins{72, 72, 72, 72}}
+	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}}
 	story := []Drawer{P("hello", Normal)}
 	dst := make([]piupage.Canvas, 2)
 	var first bytes.Buffer
