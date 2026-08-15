@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image/color"
 
+	"github.com/soypat/piudf/internal"
 	"github.com/soypat/piudf/piulex"
 )
 
@@ -260,7 +261,9 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	x3, y3 := c.ctm.Apply(x, y+h)
 	lo, hi := min(x0, x1, x2, x3), max(x0, x1, x2, x3)
 	bot, top := min(y0, y1, y2, y3), max(y0, y1, y2, y3)
-	c.links = append(c.links, Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: uri})
+	ln := internal.SliceReclaim(&c.links)
+	*ln = Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: ln.URI[:0]}
+	ln.URI = append(ln.URI, uri...)
 }
 
 // Links returns the page's link areas in the order they were added. The slice

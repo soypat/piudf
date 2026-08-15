@@ -25,12 +25,13 @@ func TestParseAtoms(t *testing.T) {
 		{"adjacent tags", "<b><i>a</i></b>", []string{"a"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseAtoms(tc.text, Normal, nil)
+			var ap atomParser
+			got := ap.parse([]byte(tc.text), Normal)
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d atoms, want %d: %v", len(got), len(tc.want), got)
 			}
 			for i, a := range got {
-				w := a.word
+				w := string(a.word)
 				if a.brk {
 					w = "|"
 				}
@@ -43,7 +44,8 @@ func TestParseAtoms(t *testing.T) {
 }
 
 func TestParseAtomsStyle(t *testing.T) {
-	atoms := parseAtoms(`a <b>b</b> <i>c</i> <font size="20">d</font>`, Normal, nil)
+	var ap atomParser
+	atoms := ap.parse([]byte(`a <b>b</b> <i>c</i> <font size="20">d</font>`), Normal)
 	if len(atoms) != 4 {
 		t.Fatalf("got %d atoms, want 4", len(atoms))
 	}
@@ -76,12 +78,13 @@ func TestParseAtomsHref(t *testing.T) {
 		{"blink is not a link", `<blink>b</blink>`, []string{""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseAtoms(tc.text, Normal, nil)
+			var ap atomParser
+			got := ap.parse([]byte(tc.text), Normal)
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d atoms, want %d", len(got), len(tc.want))
 			}
 			for i, a := range got {
-				if a.href != tc.want[i] {
+				if string(a.href) != tc.want[i] {
 					t.Errorf("atom %d (%q) href = %q, want %q", i, a.word, a.href, tc.want[i])
 				}
 			}
@@ -106,7 +109,7 @@ func TestParagraphLinkWrapsToOneRectPerLine(t *testing.T) {
 		t.Error("rects are not one per line, descending")
 	}
 	for i, ln := range links {
-		if ln.URI != "https://go.dev" {
+		if string(ln.URI) != "https://go.dev" {
 			t.Errorf("rect %d uri = %q", i, ln.URI)
 		}
 		if ln.W <= 0 || ln.H <= 0 {
@@ -156,9 +159,56 @@ func TestParagraphLinkUnderline(t *testing.T) {
 }
 
 func TestParseAtomsReusesBuffer(t *testing.T) {
-	buf := parseAtoms("one two three", Normal, nil)
-	buf = parseAtoms("four five", Normal, buf[:0])
-	if len(buf) != 2 || buf[0].word != "four" || buf[1].word != "five" {
-		t.Fatalf("reuse gave %v", buf)
+	var ap atomParser
+	ap.parse([]byte("one two three"), Normal)
+	atoms := ap.parse([]byte("four five"), Normal)
+	if len(atoms) != 2 || string(atoms[0].word) != "four" || string(atoms[1].word) != "five" {
+		t.Fatalf("reuse gave %v", atoms)
+	}
+}
+
+// The parser hands out views into the caller's text, which is only sound if it
+// never writes to it — including for the text it has to resolve entities in.
+func TestParseDoesNotWriteToText(t *testing.T) {
+	const src = `Tom &amp; Jerry <a href="u?x=1&amp;y=2">&lt;docs&gt;</a> &#160; end`
+	text := []byte(src)
+	p := &Paragraph{Text: text, Style: Normal}
+	f := Frame{X: 0, Width: 200, Top: 500, Bottom: 0}
+	for i := range 2 {
+		dst := newCanvases(t, 1)
+		if _, _, err := p.Draw(dst, f, f.Top); err != nil {
+			t.Fatalf("draw %d: %v", i, err)
+		}
+		if string(text) != src {
+			t.Fatalf("draw %d wrote to the caller's text:\n got %q\nwant %q", i, text, src)
+		}
+	}
+}
+
+// A table draws every bare-string cell through one shared Paragraph, so the
+// second cell's parse reuses the buffers the first cell's link target was a view
+// into. The annotation has to have copied it by then.
+func TestLinkSurvivesTheNextParse(t *testing.T) {
+	dst := newCanvases(t, 1)
+	f := Frame{X: 0, Width: 400, Top: 500, Bottom: 0}
+	var p Paragraph
+	p.Style = Normal
+	for i, src := range []string{
+		`<a href="https://a.test/?x=1&amp;y=2">first</a> and some more words after it`,
+		`<a href="https://b.test/?p=3&amp;q=4">second</a>`,
+	} {
+		p.Text = []byte(src)
+		if _, _, err := p.Draw(dst, f, f.Top-float64(i)*20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := dst[0].Links()
+	if len(links) != 2 {
+		t.Fatalf("got %d links, want 2", len(links))
+	}
+	for i, want := range []string{"https://a.test/?x=1&y=2", "https://b.test/?p=3&q=4"} {
+		if got := string(links[i].URI); got != want {
+			t.Errorf("link %d uri = %q, want %q", i, got, want)
+		}
 	}
 }

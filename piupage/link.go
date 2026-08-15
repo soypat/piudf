@@ -5,7 +5,7 @@ import "github.com/soypat/piudf"
 // Link is an undrawn rectangular area of a page that resolves to a URI when clicked.
 type Link struct {
 	X, Y, W, H float64
-	URI        string
+	URI        []byte
 }
 
 // Rect returns the annotation's lower-left and upper-right corners. A Link
@@ -46,7 +46,7 @@ func WriteLink(enc *piudf.Encoder, ln Link) (piudf.ObjectID, error) {
 	// A URI is bytes, not a text string: it must not go through the UTF-16BE
 	// treatment a /Title would get.
 	enc.Name("URI")
-	enc.String(ln.URI)
+	enc.StringBytes(ln.URI)
 	enc.DictClose()
 	enc.DictClose()
 	enc.EndObject()

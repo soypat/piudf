@@ -59,12 +59,12 @@ func main() {
 		ColWidths: []float64{118 * mm, 48 * mm},
 		Style:     metaStyle,
 		Rows: [][]doc.Cell{{
-			doc.FlowCell(doc.P("COMMERCIAL INVOICE", h1)),
-			doc.FlowCell(doc.P(
+			doc.Cell{Drawer: doc.P("COMMERCIAL INVOICE", h1)},
+			doc.Cell{Drawer: doc.P(
 				`<font size="8" color="#555555">INVOICE No.</font><br/>`+
 					`<b>0001-2026</b><br/>`+
 					`<font size="8" color="#555555">DATE</font><br/>`+
-					`<b>July 7, 2026</b>`, base)),
+					`<b>July 7, 2026</b>`, base)},
 		}},
 	})
 	story = append(story, doc.Spacer{H: 6})
@@ -91,7 +91,7 @@ func main() {
 	story = append(story, &doc.Table{
 		ColWidths: []float64{83 * mm, 83 * mm},
 		Style:     ftStyle,
-		Rows:      [][]doc.Cell{{doc.FlowCell(seller), doc.FlowCell(buyer)}},
+		Rows:      [][]doc.Cell{{doc.Cell{Drawer: seller}, doc.Cell{Drawer: buyer}}},
 	})
 	story = append(story, doc.Spacer{H: 16})
 
@@ -115,8 +115,8 @@ func main() {
 		ColWidths: []float64{136 * mm, 30 * mm},
 		Style:     itemsStyle,
 		Rows: [][]doc.Cell{
-			{doc.FlowCell(doc.P("<b>DESCRIPTION</b>", smallBold)), doc.FlowCell(doc.P("<b>AMOUNT (USD)</b>", smallBold))},
-			{doc.FlowCell(desc), doc.FlowCell(doc.P("343.00", base))},
+			{doc.Cell{Drawer: doc.P("<b>DESCRIPTION</b>", smallBold)}, doc.Cell{Drawer: doc.P("<b>AMOUNT (USD)</b>", smallBold)}},
+			{doc.Cell{Drawer: desc}, doc.Cell{Drawer: doc.P("343.00", base)}},
 		},
 	})
 	story = append(story, doc.Spacer{H: 4})
@@ -129,8 +129,8 @@ func main() {
 		Style:     totStyle,
 		Rows: [][]doc.Cell{{
 			doc.TextCell(""),
-			doc.FlowCell(doc.P(`<font size="8" color="#555555">TOTAL</font>`, base)),
-			doc.FlowCell(doc.P("<b>USD 343.00</b>", tot)),
+			doc.Cell{Drawer: doc.P(`<font size="8" color="#555555">TOTAL</font>`, base)},
+			doc.Cell{Drawer: doc.P("<b>USD 343.00</b>", tot)},
 		}},
 	})
 	story = append(story, doc.Spacer{H: 18})
@@ -139,7 +139,7 @@ func main() {
 	story = append(story, doc.P("<b>PAYMENT DETAILS</b>", label))
 	story = append(story, doc.Spacer{H: 3})
 	payRow := func(k, v string) []doc.Cell {
-		return []doc.Cell{doc.FlowCell(doc.P(k, small)), doc.FlowCell(doc.P(v, base))}
+		return []doc.Cell{{Drawer: doc.P(k, small)}, {Drawer: doc.P(v, base)}}
 	}
 	var payStyle doc.TableStyle
 	payStyle.Valign(0, 0, -1, -1, doc.Top).Pad(0, 0, -1, -1, 0, 6, 0, 3)

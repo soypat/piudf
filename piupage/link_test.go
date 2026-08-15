@@ -48,7 +48,7 @@ func writeLink(t *testing.T, ln Link) string {
 }
 
 func TestWriteLink(t *testing.T) {
-	got := writeLink(t, Link{X: 10, Y: 20, W: 30, H: 40, URI: "https://go.dev"})
+	got := writeLink(t, Link{X: 10, Y: 20, W: 30, H: 40, URI: []byte("https://go.dev")})
 	for _, want := range []string{
 		"/Type/Annot",
 		"/Subtype/Link",
@@ -70,7 +70,7 @@ func TestWriteLink(t *testing.T) {
 func TestWriteLinkEscapesURI(t *testing.T) {
 	// The three bytes a literal string cannot carry raw. A URI is bytes, not a
 	// text string, so this escaping is the whole of its protection.
-	got := writeLink(t, Link{URI: `https://x.test/a(b)c\d`})
+	got := writeLink(t, Link{URI: []byte(`https://x.test/a(b)c\d`)})
 	const want = `(https://x.test/a\(b\)c\\d)`
 	if !strings.Contains(got, want) {
 		t.Errorf("URI not escaped, want %s in:\n%s", want, got)
