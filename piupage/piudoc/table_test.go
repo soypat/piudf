@@ -207,3 +207,33 @@ func mustFont(t testing.TB, name string) piupage.Font {
 	}
 	return f
 }
+
+// A table decides its cells' alignment, but the paragraph is the caller's. The
+// same one used in two columns must come out of the draw exactly as it went in —
+// and must not have been used as the table's scratch on the way through.
+func TestTableDoesNotRestyleTheCallersParagraph(t *testing.T) {
+	p := P("shared between both columns", Normal)
+	var ts TableStyle
+	ts.Align(1, 0, 1, 0, Right)
+	tbl := &Table{
+		Rows:      [][]Cell{{{Drawer: p}, {Drawer: p}}},
+		ColWidths: []float64{200, 200},
+		Style:     ts,
+	}
+	dst := newCanvases(t, 1)
+	f := Frame{X: 0, Width: 400, Top: 500, Bottom: 0}
+	if _, _, err := tbl.Draw(dst, f, f.Top); err != nil {
+		t.Fatal(err)
+	}
+	// Right alignment belonged to column 1 alone. Left is also the zero value,
+	// so a table that writes back leaves the paragraph holding Right — whichever
+	// cell was measured last, not the one the reader sees.
+	if p.Style.Align != Left {
+		t.Errorf("the table wrote its alignment back into the caller: Align = %v", p.Style.Align)
+	}
+	// The paragraph was never drawn on its own, so nothing should ever have
+	// parsed into its buffers: the table has scratch of its own for that.
+	if p.parser.atoms != nil || p.parser.esc != nil || p.line != nil {
+		t.Error("the table parsed into the caller's paragraph rather than its own")
+	}
+}

@@ -306,7 +306,9 @@ func (t *Table) cellDrawer(ci, r int) Drawer {
 	cell := t.Rows[r][ci]
 	if cell.Drawer != nil {
 		if p, ok := cell.Drawer.(*Paragraph); ok {
-			p.Style.Align = t.align(ci, r)
+			t.cell.CopyFrom(p)
+			t.cell.Style.Align = t.align(ci, r)
+			return &t.cell
 		}
 		return cell.Drawer
 	}

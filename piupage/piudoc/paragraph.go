@@ -49,6 +49,19 @@ func isSpaceWord(b []byte) bool { return len(b) == 1 && &b[0] == &spaceWord[0] }
 // never again. A caller with a buffer of its own sets [Paragraph.Text] instead.
 func P(text string, s Style) *Paragraph { return &Paragraph{Text: []byte(text), Style: s} }
 
+// CopyFrom loads src's text and style into p, keeping p's own scratch. It is how
+// one paragraph is reused to draw many: p parses into the buffers it has already
+// grown, and src is only read.
+//
+// The scratch is what must not come across. Those buffers belong to the
+// paragraph that grew them — taking src's would have p's next draw write through
+// into memory src owns, and would hand p's own away one source at a time.
+func (p *Paragraph) CopyFrom(src *Paragraph) {
+	p.Text = append(p.Text[:0], src.Text...)
+	p.line = append(p.line[:0], src.line...)
+	p.Style = src.Style
+}
+
 // Draw breaks the text greedily to the frame's width and paints it from yTop
 // down, continuing onto further pages as it fills them.
 func (p *Paragraph) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
