@@ -42,7 +42,7 @@ func main() {
 	tot := doc.Style{Font: "Helvetica", Size: 12, Leading: 15, Color: DARK}
 	start := time.Now()
 	d := &doc.Doc{
-		Size:    doc.A4,
+		Size:    doc.SizeA4(),
 		Margins: doc.Margins{Left: 22 * mm, Right: 22 * mm, Top: 20 * mm, Bottom: 20 * mm},
 		Title:   "Commercial Invoice 0001-2026",
 		Author:  "Jane Doe",
@@ -160,9 +160,14 @@ func main() {
 
 	story = append(story, doc.HRule{Thickness: 0.5, Color: LIGHT})
 	story = append(story, doc.Spacer{H: 8})
+	// The footnote's <a href> becomes a /Link annotation on whichever page it lands on.
+	footnote := small
+	footnote.Link = doc.LinkStyle{Color: canvas.HexColor("#0645AD"), Underline: true}
 	story = append(story, doc.P(
 		"Export of services rendered to a foreign customer. "+
-			"Not subject to local VAT — exportación de servicios.", small))
+			"Not subject to local VAT — exportación de servicios. "+
+			`Terms at <a href="https://pkg.go.dev/github.com/soypat/piudf">pkg.go.dev/github.com/soypat/piudf</a>.`,
+		footnote))
 
 	// The document owns no memory of its own: the pages it may use, their
 	// content buffers and the encoder's are all supplied here.

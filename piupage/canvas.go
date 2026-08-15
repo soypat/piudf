@@ -33,12 +33,6 @@ type Canvas struct {
 // maxGDepth is the graphics state nesting Canvas admits. See Canvas.stack.
 const maxGDepth = 32
 
-// Link is a undrawn rectangular area of a page that resolves to a URI when clicked.
-type Link struct {
-	X, Y, W, H float64
-	URI        string
-}
-
 // Mark is a position in a Canvas's content stream, taken by [Canvas.Mark] and
 // retracted to by [Canvas.Rewind]. A Mark is invalidated by [Canvas.Reset].
 type Mark struct {
@@ -91,8 +85,8 @@ func (c *Canvas) Reset(emitScratch []byte) error {
 	return c.emit.Reset(&c.buf, emitScratch)
 }
 
-// Save pushes the graphics state level — transform, clip, colors and line parameters
-// — and returns a token restoring it. It is PDF's q operator.
+// Save pushes the graphics state level: transform, clip, colors and line parameters
+// and returns a token restoring it. It is PDF's q operator.
 func (c *Canvas) Save() StateLevel {
 	if c.depth >= maxGDepth {
 		c.emit.Fail(errGDepth)
@@ -269,7 +263,10 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	c.links = append(c.links, Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: uri})
 }
 
-// Links returns the page's link areas in the order they were added.
+// Links returns the page's link areas in the order they were added. The slice
+// is the canvas's own storage and stays valid until the next [Canvas.Reset],
+// which is what lets a page writer emit the annotations after the content
+// stream is complete.
 func (c *Canvas) Links() []Link { return c.links }
 
 // StrokeRect strokes the outline of the rectangle at (x,y) of size w×h.

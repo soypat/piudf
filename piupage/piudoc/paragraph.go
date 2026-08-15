@@ -27,6 +27,8 @@ type piece struct {
 	font piupage.Font
 	size float64
 	col  color.Color
+	// href is the link target the piece belongs to, "" for ordinary text.
+	href string
 }
 
 // P constructs a Paragraph from text and a style.
@@ -66,10 +68,17 @@ func (p *Paragraph) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, 
 			lineW, maxSize, space = 0, 0, 0
 		}
 		if space > 0 {
-			p.line = append(p.line, piece{" ", a.font, a.size, a.col})
+			// The space belongs to a link only when it sits between two words
+			// of the same one. Giving it the incoming atom's href would let a
+			// link's rectangle swallow the space in front of it.
+			href := ""
+			if prev := p.line[len(p.line)-1]; prev.href == a.href {
+				href = a.href
+			}
+			p.line = append(p.line, piece{" ", a.font, a.size, a.col, href})
 			lineW += space
 		}
-		p.line = append(p.line, piece{a.word, a.font, a.size, a.col})
+		p.line = append(p.line, piece{a.word, a.font, a.size, a.col, a.href})
 		lineW += wordW
 		if a.size > maxSize {
 			maxSize = a.size
@@ -106,17 +115,48 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, l
 	case Center:
 		startX = x0 + (avail-lineW)/2
 	}
-	base := y - 0.8*maxf(maxSize, p.Style.Size)
+	h := maxf(maxSize, p.Style.Size)
+	base := y - 0.8*h
 	px := startX
+	// A link is registered once per maximal run of pieces sharing an href, not
+	// once per word-a PDF has no multi-piece annotation, and one object per word
+	// would be both wasteful and visibly gappy. A run broken by wrapping ends
+	// here and resumes on the next line, which is exactly the rect a reader
+	// wants.
+	runHref, runX := "", 0.0
 	for _, pc := range p.line {
+		if pc.href != runHref {
+			p.closeRun(cv, runHref, runX, px, base, h)
+			runHref, runX = pc.href, px
+		}
 		if pc.text != " " {
 			cv.SetFont(pc.font, pc.size)
 			cv.Text(px, base, pc.text, pc.col)
 		}
 		px += piupage.StringWidth(pc.font, pc.text, pc.size)
 	}
+	p.closeRun(cv, runHref, runX, px, base, h)
 	p.line = p.line[:0]
 	return adv, y - lineH, nil
+}
+
+// closeRun registers the linked run spanning [x0, x1) on the line whose
+// baseline is at base, and underlines it if the style asks. It is a no-op for
+// the unlinked stretches between runs.
+func (p *Paragraph) closeRun(cv *piupage.Canvas, href string, x0, x1, base, h float64) {
+	if href == "" || x1 <= x0 {
+		return
+	}
+	// The annotation covers the line box the text sits in: 0.8*h of it is above
+	// the baseline, matching how base itself was derived.
+	cv.Link(x0, base-0.2*h, x1-x0, h, href)
+	if p.Style.Link.Underline {
+		col := p.Style.Link.Color
+		if col == nil {
+			col = p.Style.color()
+		}
+		cv.Line(x0, base-0.1*h, x1, base-0.1*h, maxf(0.05*h, 0.4), col)
+	}
 }
 
 func maxf(a, b float64) float64 {
@@ -133,12 +173,14 @@ type atom struct {
 	font piupage.Font
 	size float64
 	col  color.Color
+	href string
 }
 
 // spanStyle is the mutable markup state during parsing.
 type spanStyle struct {
 	size float64
 	col  color.Color
+	href string
 	bold bool
 	ital bool
 }
@@ -198,7 +240,17 @@ func parseAtoms(text string, base Style, dst []atom) []atom {
 				cur.col = piupage.HexColor(v)
 			}
 			stack = append(stack, cur)
-		case tag == "/b" || tag == "/i" || tag == "/font":
+		// <link> is reportlab's spelling of the same thing. "a" is matched
+		// exactly rather than by prefix so it cannot swallow another tag that
+		// happens to start with it.
+		case tag == "a" || strings.HasPrefix(tag, "a ") || strings.HasPrefix(tag, "link"):
+			cur := stack[len(stack)-1]
+			cur.href = unescape(attr(tag, "href"))
+			if base.Link.Color != nil {
+				cur.col = base.Link.Color
+			}
+			stack = append(stack, cur)
+		case tag == "/b" || tag == "/i" || tag == "/font" || tag == "/a" || tag == "/link":
 			if len(stack) > 1 {
 				stack = stack[:len(stack)-1]
 			}
@@ -222,7 +274,7 @@ func appendWords(dst []atom, s string, cur spanStyle, family string) []atom {
 			j++
 		}
 		if j > i {
-			dst = append(dst, atom{word: s[i:j], font: f, size: cur.size, col: cur.col})
+			dst = append(dst, atom{word: s[i:j], font: f, size: cur.size, col: cur.col, href: cur.href})
 		}
 		i = j
 	}

@@ -21,9 +21,20 @@ const (
 	Bottom
 )
 
-// Style mirrors reportlab's ParagraphStyle: the default text formatting for a
-// paragraph or table cell. A zero Color means black; a zero Leading means
-// 1.2*Size.
+// LinkStyle is how an <a href> span is drawn. A PDF link annotation paints
+// nothing of its own, so without a LinkStyle a link is invisible but clickable.
+// The zero value inherits the enclosing span's color and draws no rule, which
+// leaves the annotation purely behavioural.
+type LinkStyle struct {
+	// Color overrides the span's text color; nil inherits it.
+	Color color.Color
+	// Underline draws a rule just under the baseline, the width of the linked
+	// run on each line it wraps to.
+	Underline bool
+}
+
+// Style is the default text formatting for a
+// paragraph or table cell. A zero Color means black; a zero Leading means 1.2*Size.
 type Style struct {
 	Font        string // canvas /BaseFont family, e.g. "Helvetica"; "" => Helvetica
 	Size        float64
@@ -34,6 +45,7 @@ type Style struct {
 	SpaceAfter  float64
 	LeftIndent  float64
 	RightIndent float64
+	Link        LinkStyle
 }
 
 // leading returns the effective baseline-to-baseline distance.
