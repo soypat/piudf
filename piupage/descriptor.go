@@ -85,13 +85,13 @@ func (d descriptor) stemV() int {
 
 // capHeightOf reports the cap height in glyph space, falling back to the 'H'
 // glyph's own bounding box for a font whose OS/2 table leaves the field zero.
-func (d descriptor) capHeightOf(f Font, src sfnt.Source) float64 {
+func (d descriptor) capHeightOf(f fontEmbeddable) float64 {
 	if d.capHeight != 0 {
 		return d.scale(float64(d.capHeight))
 	}
 	// A glyf record opens with the contour count and then its bounding box, so
 	// the record itself carries the height without any table walk.
-	if rec := src.GlyphData(f.GlyphID('H')); len(rec) >= 10 {
+	if rec := f.GlyphData(f.GlyphID('H')); len(rec) >= 10 {
 		if yMax := s16(rec, 8); yMax != 0 {
 			return d.scale(float64(yMax))
 		}

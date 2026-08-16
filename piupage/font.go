@@ -26,6 +26,11 @@ type Font interface {
 	GlyphAdvance(glyph uint16) int32
 }
 
+type fontEmbeddable interface {
+	Font
+	sfnt.Source
+}
+
 // GlyphUse is one glyph a canvas drew and the rune it was reached through: the
 // pair a /ToUnicode map is built from, and the set a subset is cut to.
 type GlyphUse struct {
@@ -63,9 +68,10 @@ func Standard14(name string) (f Font, ok bool) {
 var _ Font = FontBuiltin(0)
 
 // WriteFont emits f's PDF object(s) into enc and returns the font dictionary's id.
+// WriteFont can embed a non-standard font if argument Font implements [fontEmbeddable] which extends [Font] with [sfnt.Source].
 func WriteFont(enc *piudf.Encoder, f Font, glyphs []GlyphUse) (piudf.ObjectID, error) {
-	if src, ok := f.(sfnt.Source); ok {
-		return writeEmbeddedFont(enc, f, src, glyphs)
+	if fe, ok := f.(fontEmbeddable); ok {
+		return writeEmbeddedFont(enc, fe, glyphs)
 	}
 	return writeBuiltinFont(enc, f)
 }
@@ -74,8 +80,8 @@ func WriteFont(enc *piudf.Encoder, f Font, glyphs []GlyphUse) (piudf.ObjectID, e
 // CIDFontType2 descendant. [sfnt.Subsetter] preserves glyph ids from the source
 // program, which is what lets the descendant declare /CIDToGIDMap /Identity and
 // spares this layer any renumbering.
-func writeEmbeddedFont(enc *piudf.Encoder, f Font, src sfnt.Source, glyphs []GlyphUse) (piudf.ObjectID, error) {
-	d := readDescriptor(src, f.UnitsPerEm())
+func writeEmbeddedFont(enc *piudf.Encoder, fe fontEmbeddable, glyphs []GlyphUse) (piudf.ObjectID, error) {
+	d := readDescriptor(fe, fe.UnitsPerEm())
 	gids := make([]uint16, len(glyphs))
 	for i := range glyphs {
 		gids[i] = glyphs[i].Glyph
@@ -83,11 +89,11 @@ func writeEmbeddedFont(enc *piudf.Encoder, f Font, src sfnt.Source, glyphs []Gly
 	// The subsetter is local: cutting a subset is a write-time act, and two
 	// documents written at once must not share its scratch.
 	var sub sfnt.Subsetter
-	program, err := sub.AppendSubset(nil, src, gids)
+	program, err := sub.AppendSubset(nil, fe, gids)
 	if err != nil {
 		return piudf.ObjectID{}, err
 	}
-	name := f.PostScriptName()
+	name := fe.PostScriptName()
 	if name == "" {
 		// A face whose name table carries no PostScript name still needs a
 		// /BaseFont: an empty one is a valid PDF name that no reader can report
@@ -136,7 +142,7 @@ func writeEmbeddedFont(enc *piudf.Encoder, f Font, src sfnt.Source, glyphs []Gly
 	enc.Name("Descent")
 	enc.Real(d.scale(float64(d.descent)))
 	enc.Name("CapHeight")
-	enc.Real(d.capHeightOf(f, src))
+	enc.Real(d.capHeightOf(fe))
 	enc.Name("StemV")
 	enc.Int(int64(d.stemV()))
 	enc.Name("FontFile2")
@@ -172,7 +178,7 @@ func writeEmbeddedFont(enc *piudf.Encoder, f Font, src sfnt.Source, glyphs []Gly
 	enc.Name("DW")
 	enc.Int(1000)
 	enc.Name("W")
-	writeWidths(enc, f, d, gids)
+	writeWidths(enc, fe, d, gids)
 	enc.Name("CIDToGIDMap")
 	enc.Name("Identity")
 	enc.DictClose()
@@ -201,8 +207,7 @@ func writeEmbeddedFont(enc *piudf.Encoder, f Font, src sfnt.Source, glyphs []Gly
 }
 
 // subsetTag derives the six-uppercase-letter subset prefix PDF requires on an
-// embedded subset's /BaseFont, hashing the glyph set so the same document
-// always produces the same tag.
+// embedded subset's /BaseFont
 func subsetTag(gids []uint16) string {
 	var h uint32 = 2166136261
 	for _, gid := range gids {
@@ -237,8 +242,7 @@ func writeWidths(enc *piudf.Encoder, f Font, d descriptor, gids []uint16) {
 }
 
 // writeToUnicode emits the CMap that maps this font's glyph ids back to the
-// runes they came from. Without it the drawn text is a bag of glyph indices:
-// copy-paste and full-text search out of the finished PDF both fail.
+// runes they came from.
 func writeToUnicode(enc *piudf.Encoder, glyphs []GlyphUse) (piudf.ObjectID, error) {
 	var b []byte
 	b = append(b, "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"...)
