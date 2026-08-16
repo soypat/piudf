@@ -2,6 +2,108 @@ package piupage
 
 import "github.com/soypat/piudf"
 
+//go:generate go tool stringer -linecomment -type=FontBuiltin -output=stringers.go
+
+// FontBuiltin is one of the 14 fonts every conforming PDF reader carries, so
+// none is embedded. The zero value names no font.
+type FontBuiltin uint8
+
+const (
+	_                        FontBuiltin = iota
+	FontHelvetica                        // Helvetica
+	FontHelveticaOblique                 // Helvetica-Oblique
+	FontHelveticaBold                    // Helvetica-Bold
+	FontHelveticaBoldOblique             // Helvetica-BoldOblique
+	FontTimesRoman                       // Times-Roman
+	FontTimesBold                        // Times-Bold
+	FontTimesItalic                      // Times-Italic
+	FontTimesBoldItalic                  // Times-BoldItalic
+	FontCourier                          // Courier
+	FontCourierBold                      // Courier-Bold
+	FontCourierOblique                   // Courier-Oblique
+	FontCourierBoldOblique               // Courier-BoldOblique
+	FontSymbol                           // Symbol
+	FontZapfDingbats                     // ZapfDingbats
+)
+
+// IsValid reports whether b names one of the 14, which the zero value does not.
+func (b FontBuiltin) IsValid() bool { return b >= FontHelvetica && b <= FontZapfDingbats }
+
+// PostScriptName is the font's /BaseFont name, e.g. "Helvetica-Bold".
+func (b FontBuiltin) PostScriptName() string { return b.String() }
+
+// UnitsPerEm is the design grid, 1000 for every Type1 face.
+func (b FontBuiltin) UnitsPerEm() int { return 1000 }
+
+// GlyphID is the WinAnsi code b draws r as, 0 if the encoding has none — which
+// is the same "cannot spell this" a glyf font reports as .notdef.
+func (b FontBuiltin) GlyphID(r rune) uint16 {
+	c, ok := winansiByte(r)
+	if !ok {
+		return 0
+	}
+	return uint16(c)
+}
+
+// GlyphAdvance is a WinAnsi code's advance in font units. A code the width
+// table does not carry falls back to '?', as an unencodable rune does.
+func (b FontBuiltin) GlyphAdvance(glyph uint16) int32 {
+	if glyph > 0xff {
+		return 0
+	}
+	w := b.widths()
+	adv := w[glyph]
+	if adv == 0 {
+		adv = w['?']
+	}
+	return int32(adv)
+}
+
+// widths is b's AFM advance table. Only the two Helvetica weights carry real
+// metrics in this first cut; the rest stand in with Helvetica's.
+func (b FontBuiltin) widths() *[256]int16 {
+	switch b {
+	case FontHelveticaBold, FontHelveticaBoldOblique:
+		return &helveticaBoldWidths
+	}
+	return &helveticaWidths
+}
+
+func (b FontBuiltin) BaseName() string { return b.String() }
+
+func (b FontBuiltin) Width(r rune) float64 {
+	c, ok := winansiByte(r)
+	if !ok {
+		c = '?'
+	}
+	return float64(b.GlyphAdvance(uint16(c))) / 1000
+}
+
+func (b FontBuiltin) Encode(dst []byte, r rune) []byte {
+	c, ok := winansiByte(r)
+	if !ok {
+		c = '?'
+	}
+	return append(dst, c)
+}
+
+func (b FontBuiltin) writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error) {
+	id := enc.NewID()
+	enc.BeginObject(id)
+	enc.DictOpen()
+	enc.Name("Type")
+	enc.Name("Font")
+	enc.Name("Subtype")
+	enc.Name("Type1")
+	enc.Name("BaseFont")
+	enc.Name(b.String())
+	enc.Name("Encoding")
+	enc.Name("WinAnsiEncoding")
+	enc.DictClose()
+	enc.EndObject()
+	return id, enc.Err()
+}
+
 // Adobe AFM advance-width tables for the Helvetica family, indexed by WinAnsi
 // byte, in units of 1/1000 em. First cut ships the two weights the invoice
 // uses; the rest of the standard-14 tables are purely additive.
@@ -110,43 +212,4 @@ func winansiByte(r rune) (b byte, ok bool) {
 		return 0x9f, true
 	}
 	return 0, false
-}
-
-func (f *stdFont) BaseName() string { return f.base }
-
-func (f *stdFont) Width(r rune) float64 {
-	b, ok := winansiByte(r)
-	if !ok {
-		b = '?'
-	}
-	w := f.widths[b]
-	if w == 0 {
-		w = f.widths['?'] // unmapped-but-present code falls back to '?'
-	}
-	return float64(w) / 1000
-}
-
-func (f *stdFont) Encode(dst []byte, r rune) []byte {
-	b, ok := winansiByte(r)
-	if !ok {
-		b = '?'
-	}
-	return append(dst, b)
-}
-
-func (f *stdFont) writeObjects(enc *piudf.Encoder) (piudf.ObjectID, error) {
-	id := enc.NewID()
-	enc.BeginObject(id)
-	enc.DictOpen()
-	enc.Name("Type")
-	enc.Name("Font")
-	enc.Name("Subtype")
-	enc.Name("Type1")
-	enc.Name("BaseFont")
-	enc.Name(f.base)
-	enc.Name("Encoding")
-	enc.Name("WinAnsiEncoding")
-	enc.DictClose()
-	enc.EndObject()
-	return id, enc.Err()
 }

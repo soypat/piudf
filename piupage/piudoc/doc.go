@@ -85,6 +85,10 @@ type Doc struct {
 	Lang    string
 	OnPage  func(c *piupage.Canvas, p PageInfo)
 
+	// CheckGlyphs fails [Doc.Build] on a glyph the font cannot draw or a font
+	// too damaged to describe itself. NOT IMPLEMENTED: setting it does nothing.
+	CheckGlyphs bool
+
 	w   io.Writer
 	enc piudf.Encoder
 	// global objects.

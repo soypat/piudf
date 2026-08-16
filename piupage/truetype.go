@@ -24,27 +24,26 @@ import (
 // OpenType/CFF fonts (an 'OTTO' sfnt) have no glyf table to subset and are
 // rejected; feed a .ttf.
 func TrueType(data []byte) (Font, error) {
-	fnt, err := lefevre.FontFromMemory(data, 0)
-	if err != nil {
+	f := new(ttfFont)
+	// A load that fails leaves the font unusable and says why; one that
+	// succeeds may still have skipped a damaged table, which Err reports and
+	// which is worth refusing here rather than meeting later as an empty one.
+	if err := f.fnt.LoadBytes(data, 0); err != nil {
 		return nil, err
-	} else if !fnt.IsValid() {
-		return nil, errors.New("piupage: font parsed but invalid")
+	} else if err = f.fnt.Err(); err != nil {
+		return nil, err
 	}
-	info := fnt.Info()
-	if info.UnitsPerEm == 0 {
+	f.fnt.ReadInfo(&f.info)
+	if f.info.UnitsPerEm == 0 {
 		return nil, errors.New("piupage: font declares no units per em")
 	}
-	if fnt.OutlineFormat() != lefevre.OutlineGlyf {
+	if f.fnt.OutlineFormat() != lefevre.OutlineGlyf {
 		return nil, sfnt.ErrNoOutlines
 	}
-	f := &ttfFont{
-		fnt:  fnt,
-		info: info,
-		upem: float64(info.UnitsPerEm),
-	}
-	f.name = info.PostScriptName
+	f.upem = float64(f.info.UnitsPerEm)
+	f.name = f.info.PostScriptName
 	if f.name == "" {
-		f.name = info.FullName
+		f.name = f.info.FullName
 	}
 	if f.name == "" {
 		f.name = "Embedded"

@@ -41,39 +41,12 @@ func WriteFont(enc *piudf.Encoder, f Font) (piudf.ObjectID, error) {
 // the Helvetica family carries real metrics in this first cut; other names
 // resolve with Helvetica widths as a stand-in.
 func Standard14(name string) (f Font, ok bool) {
-	for i := range std14 {
-		if std14[i].base == name {
-			return &std14[i], true
+	for b := FontHelvetica; b <= FontZapfDingbats; b++ {
+		if b.String() == name {
+			return b, true
 		}
 	}
 	return nil, false
 }
 
-// std14 holds the built-in fonts as singletons so that resolving one costs
-// nothing and two resolutions of the same name compare equal as interface
-// values, which is what [Canvas.ensure] keys a page's resources on.
-var std14 = [14]stdFont{
-	{base: "Helvetica", widths: &helveticaWidths},
-	{base: "Helvetica-Oblique", widths: &helveticaWidths},
-	{base: "Helvetica-Bold", widths: &helveticaBoldWidths},
-	{base: "Helvetica-BoldOblique", widths: &helveticaBoldWidths},
-	{base: "Times-Roman", widths: &helveticaWidths},
-	{base: "Times-Bold", widths: &helveticaWidths},
-	{base: "Times-Italic", widths: &helveticaWidths},
-	{base: "Times-BoldItalic", widths: &helveticaWidths},
-	{base: "Courier", widths: &helveticaWidths},
-	{base: "Courier-Bold", widths: &helveticaWidths},
-	{base: "Courier-Oblique", widths: &helveticaWidths},
-	{base: "Courier-BoldOblique", widths: &helveticaWidths},
-	{base: "Symbol", widths: &helveticaWidths},
-	{base: "ZapfDingbats", widths: &helveticaWidths},
-}
-
-// stdFont is a built-in (non-embedded) Type1 font backed by an AFM width table
-// and WinAnsi encoding. See afm.go.
-type stdFont struct {
-	base   string      // /BaseFont name
-	widths *[256]int16 // per-1000-em advance keyed by WinAnsi byte
-}
-
-var _ Font = (*stdFont)(nil)
+var _ Font = FontBuiltin(0)
