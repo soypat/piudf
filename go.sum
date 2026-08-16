@@ -4,6 +4,8 @@ github.com/soypat/lefevre v0.0.0-20260813021733-494b64173743 h1:YeJlBvSKDDQkEeby
 github.com/soypat/lefevre v0.0.0-20260813021733-494b64173743/go.mod h1:isEsoKIedVFjONjTPEzACot3Wj7eHvvI1y7j56X3ffU=
 github.com/soypat/lefevre v0.0.0-20260816201204-a6d6844eb9e5 h1:4RsGs56N1sA8NM0E/6e1eoZotjHjzc/JHkgltHpD5fc=
 github.com/soypat/lefevre v0.0.0-20260816201204-a6d6844eb9e5/go.mod h1:isEsoKIedVFjONjTPEzACot3Wj7eHvvI1y7j56X3ffU=
+github.com/soypat/lefevre v0.0.0-20260816213937-7ecc332044df h1:RakgqDAKvg6eS5oLWoEtAtFnaZ09qwA8JqF/0Kifkzs=
+github.com/soypat/lefevre v0.0.0-20260816213937-7ecc332044df/go.mod h1:isEsoKIedVFjONjTPEzACot3Wj7eHvvI1y7j56X3ffU=
 golang.org/x/mod v0.38.0 h1:MECBjubtXD7yj4HrhIUcywNaGeNVUdfVnxmPajOk4yk=
 golang.org/x/mod v0.38.0/go.mod h1:V6Xz0pq8TQ3dGqVQ1FVHuelZpAL0uNhSkk9ogYP3c40=
 golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
