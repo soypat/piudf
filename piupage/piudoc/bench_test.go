@@ -95,7 +95,8 @@ func BenchmarkTableDraw(b *testing.B) {
 		rows[i] = []Cell{bld.TextCell("left"), bld.TextCell("a middle column"), bld.TextCell("42.00")}
 	}
 	t := &Table{Rows: rows, ColWidths: []float64{150, 200, 100}}
-	t.Style.Grid(0, 0, -1, -1, 0.5, nil).Background(0, 0, -1, 0, nil).Valign(0, 0, -1, -1, Middle)
+	t.Style.All().Grid(0.5, nil).Valign(Middle)
+	t.Style.Row(0).Background(nil)
 	b.ReportAllocs()
 	for b.Loop() {
 		cv[0].Reset(buf)

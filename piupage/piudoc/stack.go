@@ -53,8 +53,7 @@ func (bld *Builder) Columns(cs ColStyle, cells ...Drawer) Drawer {
 	for i, d := range cells {
 		row[i] = Cell{Drawer: d}
 	}
-	t := &Table{Rows: [][]Cell{row}, ColWidths: cs.Widths}
-	t.Style.Valign(0, 0, -1, -1, cs.Valign).
-		Pad(0, 0, -1, -1, cs.Pad.Left, cs.Pad.Right, cs.Pad.Top, cs.Pad.Bottom)
+	t := &Table{Rows: [][]Cell{row}, ColWidths: cs.Widths, Pad: cs.Pad}
+	t.Style.All().Valign(cs.Valign)
 	return t
 }

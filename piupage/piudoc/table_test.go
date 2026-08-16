@@ -20,10 +20,38 @@ func newCanvases(t testing.TB, n int) []piupage.Canvas {
 	return dst
 }
 
-// Normal is 10pt on 12pt leading and cells pad 6pt a side, so a cell of n
-// explicit lines is 12n+12 tall. Explicit <br/> keeps the arithmetic
+// Normal is 10pt on 12pt leading, so a cell of n explicit lines is 12n tall,
+// plus whatever padding the table asks for. Explicit <br/> keeps the arithmetic
 // independent of font metrics.
 const lineH, cellPad = 12.0, 6.0
+
+// A table pads its cells only when told to. The default used to be 6pt a side,
+// which every caller's first line turned back off.
+func TestTablePadDefaultsToNone(t *testing.T) {
+	tbl := &Table{
+		Rows:      [][]Cell{{bld.MarkupCell("a<br/>b<br/>c")}},
+		ColWidths: []float64{100},
+	}
+	dst := newCanvases(t, 1)
+	f := Frame{X: 0, Width: 100, Top: 500, Bottom: 0}
+	_, yEnd, err := tbl.Draw(dst, f, f.Top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := f.Top-yEnd, 3*lineH; got != want {
+		t.Errorf("row height = %v, want %v: an unasked-for pad crept in", got, want)
+	}
+	tbl.Pad = PadAll(DefaultPad)
+	tbl.widths = nil
+	dst = newCanvases(t, 1)
+	_, yEnd, err = tbl.Draw(dst, f, f.Top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := f.Top-yEnd, 3*lineH+2*DefaultPad; got != want {
+		t.Errorf("padded row height = %v, want %v", got, want)
+	}
+}
 
 func TestTableRowHeightFromTallestCell(t *testing.T) {
 	// The tall cell is last, so a table that sized rows from the first cell it
@@ -32,6 +60,7 @@ func TestTableRowHeightFromTallestCell(t *testing.T) {
 	tbl := &Table{
 		Rows:      [][]Cell{{bld.TextCell("x"), bld.TextCell("y"), bld.MarkupCell("a<br/>b<br/>c")}},
 		ColWidths: []float64{60, 60, 60},
+		Pad:       PadAll(cellPad),
 	}
 	dst := newCanvases(t, 1)
 	f := Frame{X: 0, Width: 180, Top: 500, Bottom: 0}
@@ -57,6 +86,7 @@ func TestTableSplitsBetweenRows(t *testing.T) {
 			{bld.MarkupCell("d<br/>e<br/>f")},
 		},
 		ColWidths: []float64{100},
+		Pad:       PadAll(cellPad),
 	}
 	dst := newCanvases(t, 2)
 	// Room for one row only: the second must move to the next page.
@@ -84,6 +114,7 @@ func TestTableShortBuffer(t *testing.T) {
 			{bld.MarkupCell("d<br/>e<br/>f")},
 		},
 		ColWidths: []float64{100},
+		Pad:       PadAll(cellPad),
 	}
 	dst := newCanvases(t, 1)
 	f := Frame{X: 0, Width: 100, Top: 100, Bottom: 20}
@@ -215,7 +246,7 @@ func TestTableDoesNotRestyleTheCallersParagraph(t *testing.T) {
 	p := bld.P("shared between both columns", Normal)
 	nline, text0 := len(p.line), &p.text[0]
 	var ts TableStyle
-	ts.Align(1, 0, 1, 0, Right)
+	ts.Range(1, 0, 1, 0).Align(Right)
 	tbl := &Table{
 		Rows:      [][]Cell{{{Drawer: p}, {Drawer: p}}},
 		ColWidths: []float64{200, 200},

@@ -55,9 +55,8 @@ func main() {
 
 	// Header: title + invoice meta.
 	var metaStyle doc.TableStyle
-	metaStyle.Valign(0, 0, -1, -1, doc.Top).
-		Align(1, 0, 1, 0, doc.Right).
-		Pad(0, 0, -1, -1, 0, 0, 0, 0)
+	metaStyle.All().Valign(doc.Top)
+	metaStyle.Range(1, 0, 1, 0).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{118 * mm, 48 * mm},
 		Style:     metaStyle,
@@ -90,7 +89,7 @@ func main() {
 			`Germany<br/>`+
 			`Amtsgericht Berlin (Charlottenburg), HRB 000000 B`, base)
 	var ftStyle doc.TableStyle
-	ftStyle.Valign(0, 0, -1, -1, doc.Top).Pad(0, 0, -1, -1, 0, 0, 0, 0)
+	ftStyle.All().Valign(doc.Top)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{83 * mm, 83 * mm},
 		Style:     ftStyle,
@@ -108,13 +107,10 @@ func main() {
 			`<font size="8" color="#555555">Service period: June – July 2026. `+
 			"Services rendered remotely.</font>", base)
 	var itemsStyle doc.TableStyle
-	itemsStyle.
-		LineBelow(0, 0, -1, 0, 0.8, DARK).
-		LineBelow(0, 1, -1, 1, 0.4, LIGHT).
-		Valign(0, 0, -1, -1, doc.Top).
-		Align(1, 0, 1, -1, doc.Right).
-		Pad(0, 0, -1, -1, 0, 0, 2, 2).
-		Pad(0, 1, -1, 1, 0, 0, 8, 10)
+	itemsStyle.All().Valign(doc.Top).Pad(doc.Padding{Top: 2, Bottom: 2})
+	itemsStyle.Row(0).LineBelow(0.8, DARK)
+	itemsStyle.Row(1).LineBelow(0.4, LIGHT).Pad(doc.Padding{Top: 8, Bottom: 10})
+	itemsStyle.Col(1).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{136 * mm, 30 * mm},
 		Style:     itemsStyle,
@@ -127,7 +123,8 @@ func main() {
 
 	// Totals.
 	var totStyle doc.TableStyle
-	totStyle.Align(1, 0, -1, -1, doc.Right).Pad(0, 0, -1, -1, 0, 0, 2, 2)
+	totStyle.All().Pad(doc.Padding{Top: 2, Bottom: 2})
+	totStyle.Range(1, 0, -1, -1).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{96 * mm, 40 * mm, 30 * mm},
 		Style:     totStyle,
@@ -146,7 +143,7 @@ func main() {
 		return []doc.Cell{{Drawer: bld.P(k, small)}, {Drawer: bld.P(v, base)}}
 	}
 	var payStyle doc.TableStyle
-	payStyle.Valign(0, 0, -1, -1, doc.Top).Pad(0, 0, -1, -1, 0, 6, 0, 3)
+	payStyle.All().Valign(doc.Top).Pad(doc.Padding{Right: 6, Bottom: 3})
 	story = append(story, &doc.Table{
 		ColWidths: []float64{52 * mm, 114 * mm},
 		Style:     payStyle,
