@@ -220,6 +220,9 @@ type atomParser struct {
 	// esc holds the runs and link targets whose entities had to be resolved,
 	// which are the only bytes a parse writes.
 	esc []byte
+	// families are the faces registered through [Builder.SetFamily], scanned
+	// once per run rather than once per word.
+	families []namedFamily
 }
 
 // resolve returns v with its entities resolved: v itself when it carries none,
@@ -342,7 +345,7 @@ func (ap *atomParser) appendWords(s []byte, cur spanStyle, family string) {
 // appendWordsRaw splits s where it lies, resolving nothing. Every word is a view
 // into s, so a run costs one atom per word and not a byte more.
 func (ap *atomParser) appendWordsRaw(s []byte, cur spanStyle, family string) {
-	f := resolveFont(family, cur.bold, cur.ital)
+	f := ap.resolveFont(family, cur.bold, cur.ital)
 	for i := 0; i < len(s); {
 		for i < len(s) && isSpace(s[i]) {
 			i++
@@ -404,15 +407,6 @@ func baseFamily(name string) string {
 		return name[:i]
 	}
 	return name
-}
-
-// resolveFont maps a family plus bold/italic flags to a standard-14 font.
-func resolveFont(family string, bold, ital bool) piupage.Font {
-	if f, ok := piupage.Standard14(styleName(family, bold, ital)); ok {
-		return f
-	}
-	f, _ := piupage.Standard14("Helvetica")
-	return f
 }
 
 // styleName is the /BaseFont name for a family at a weight and slant. The names
