@@ -54,7 +54,7 @@ func TestParaMixesDataAndMarkup(t *testing.T) {
 		Text("next").
 		Build(&b, Normal)
 	eq(t, words(p), []string{"a", "&", "b", "bold", "|", "next"})
-	if got := p.line[3].font.BaseName(); got != "Helvetica-Bold" {
+	if got := p.line[3].font.PostScriptName(); got != "Helvetica-Bold" {
 		t.Errorf("the markup half did not apply: %s", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestParaLinkEscapesHostileData(t *testing.T) {
 	if len(p.line[1].href) != 0 {
 		t.Error("the link escaped its own tag and swallowed what followed")
 	}
-	if got := p.line[0].font.BaseName(); got != "Helvetica" {
+	if got := p.line[0].font.PostScriptName(); got != "Helvetica" {
 		t.Errorf("link text opened a span: font = %s", got)
 	}
 }

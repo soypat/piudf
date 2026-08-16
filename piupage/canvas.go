@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image/color"
 
+	"github.com/soypat/lefevre/sfnt"
 	"github.com/soypat/piudf/internal"
 	"github.com/soypat/piudf/piulex"
 )
@@ -22,7 +23,8 @@ type Canvas struct {
 	curSize float64
 	// links records the page's link areas. They are annotations, not content,
 	// so the Canvas only collects them; the page writer emits them.
-	links []Link
+	links  []Link
+	glyphs []GlyphUse
 	// Text encodes
 	enc []byte
 	// ctm is the transform in effect and stack the ones q has saved.
@@ -40,6 +42,7 @@ type Mark struct {
 	n       int
 	fonts   int
 	links   int
+	glyphs  int
 	curFont Font
 	curSize float64
 	ctm     Matrix
@@ -51,7 +54,7 @@ type Mark struct {
 func (c *Canvas) Mark() Mark {
 	c.emit.Flush()
 	return Mark{
-		n: c.buf.Len(), fonts: len(c.used), links: len(c.links),
+		n: c.buf.Len(), fonts: len(c.used), links: len(c.links), glyphs: len(c.glyphs),
 		curFont: c.curFont, curSize: c.curSize,
 		ctm: c.ctm, depth: c.depth,
 	}
@@ -62,12 +65,13 @@ func (c *Canvas) Mark() Mark {
 // [Canvas.Reset] is a programming error and does nothing.
 func (c *Canvas) Rewind(m Mark) {
 	c.emit.Flush()
-	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) {
+	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) || m.glyphs > len(c.glyphs) {
 		return
 	}
 	c.buf.Truncate(m.n)
 	c.used = c.used[:m.fonts]
 	c.links = c.links[:m.links]
+	c.glyphs = c.glyphs[:m.glyphs]
 	c.curFont = m.curFont
 	c.curSize = m.curSize
 	c.ctm = m.ctm
@@ -81,6 +85,7 @@ func (c *Canvas) Reset(emitScratch []byte) error {
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
+	c.glyphs = c.glyphs[:0]
 	c.ctm = Identity()
 	c.depth = 0
 	return c.emit.Reset(&c.buf, emitScratch)
@@ -153,6 +158,10 @@ func (c *Canvas) DeviceXY(x, y float64) (float64, float64) { return c.ctm.Apply(
 // SetFont selects f at the given size for subsequent Text calls, registering it
 // in this page's resources.
 func (c *Canvas) SetFont(f Font, size float64) int {
+	if f != nil && f.UnitsPerEm() == 0 {
+		c.emit.Fail(errNoUnitsPerEm)
+		return 0
+	}
 	c.curFont = f
 	c.curSize = size
 	return c.ensure(f)
@@ -161,7 +170,7 @@ func (c *Canvas) SetFont(f Font, size float64) int {
 // ensure registers f and returns its resource name ("F1"…).
 func (c *Canvas) ensure(f Font) int {
 	for i := range c.used {
-		if c.used[i] == f || c.used[i].BaseName() == f.BaseName() {
+		if c.used[i] == f || c.used[i].PostScriptName() == f.PostScriptName() {
 			return i + 1
 		}
 	}
@@ -188,7 +197,7 @@ func (c *Canvas) Text(x, y float64, s string, col color.Color) {
 	c.emit.Real(x)
 	c.emit.Real(y)
 	c.emit.Ident("Td")
-	c.emit.StringBytes(c.encode(s))
+	c.emit.StringBytes(c.encode(s, num-1))
 	c.emit.Ident("Tj")
 	c.emit.Ident("ET")
 	c.emit.EOL()
@@ -202,14 +211,33 @@ func (c *Canvas) TextRight(xRight, y float64, s string, col color.Color) {
 	c.Text(xRight-StringWidth(c.curFont, s, c.curSize), y, s, col)
 }
 
-// encode converts s to the current font's byte codes.
-func (c *Canvas) encode(s string) []byte {
+// encode converts s to the current font's byte codes, recording what an
+// embedded font was asked to draw. fontIdx is the font's index in c.used.
+func (c *Canvas) encode(s string, fontIdx int) []byte {
 	c.enc = c.enc[:0]
+	f := c.curFont
+	if _, embedded := f.(sfnt.Source); !embedded {
+		for _, r := range s {
+			g := f.GlyphID(r)
+			if g == 0 {
+				// A built-in font has no .notdef to draw, so an unencodable
+				// rune arrives as '?' rather than as nothing.
+				g = '?'
+			}
+			c.enc = append(c.enc, byte(g))
+		}
+		return c.enc
+	}
 	for _, r := range s {
-		c.enc = c.curFont.Encode(c.enc, r)
+		g := f.GlyphID(r)
+		c.enc = append(c.enc, byte(g>>8), byte(g))
+		c.glyphs = append(c.glyphs, GlyphUse{Font: uint16(fontIdx), Glyph: g, Rune: r})
 	}
 	return c.enc
 }
+
+// Glyphs returns what the page's embedded fonts were asked to draw.
+func (c *Canvas) Glyphs() []GlyphUse { return c.glyphs }
 
 // Line strokes a segment from (x0,y0) to (x1,y1) with width w and color col.
 func (c *Canvas) Line(x0, y0, x1, y1, w float64, col color.Color) {

@@ -80,8 +80,8 @@ func TestStandard14Singleton(t *testing.T) {
 		f, ok := Standard14(name)
 		if !ok {
 			t.Errorf("%s not found", name)
-		} else if f.BaseName() != name {
-			t.Errorf("%s resolved to %s", name, f.BaseName())
+		} else if f.PostScriptName() != name {
+			t.Errorf("%s resolved to %s", name, f.PostScriptName())
 		}
 	}
 }

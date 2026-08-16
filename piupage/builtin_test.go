@@ -40,14 +40,14 @@ func TestFontBuiltinGlyphID(t *testing.T) {
 	}
 }
 
-// The advance a glyph reports and the width its rune reports are the same
-// measurement on two scales; drifting apart would mis-space every line.
-func TestFontBuiltinAdvanceMatchesWidth(t *testing.T) {
-	for _, b := range []FontBuiltin{FontHelvetica, FontHelveticaBold, FontTimesRoman} {
-		for _, r := range "Aa fi.—é" {
-			adv := float64(b.GlyphAdvance(b.GlyphID(r))) / float64(b.UnitsPerEm())
-			if got := b.Width(r); got != adv {
-				t.Errorf("%s %q: Width = %v, GlyphAdvance/upem = %v", b, r, got, adv)
+// A rune the encoding cannot reach still takes room on the page: it arrives as
+// '?', so it must measure as '?' too, or the line it sits on comes out short.
+func TestFontBuiltinUnencodableMeasuresAsQuestionMark(t *testing.T) {
+	for _, b := range []FontBuiltin{FontHelvetica, FontHelveticaBold} {
+		want := StringWidth(b, "?", 10)
+		for _, s := range []string{"中", "☃"} {
+			if got := StringWidth(b, s, 10); got != want {
+				t.Errorf("%s %q: width %v, want %v as for '?'", b, s, got, want)
 			}
 		}
 	}

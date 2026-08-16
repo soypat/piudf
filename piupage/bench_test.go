@@ -4,6 +4,8 @@ import (
 	"image/color"
 	"os"
 	"testing"
+
+	"github.com/soypat/lefevre"
 )
 
 func BenchmarkCanvasPage(b *testing.B) {
@@ -11,12 +13,12 @@ func BenchmarkCanvasPage(b *testing.B) {
 	if !ok {
 		b.Fatal("Helvetica is not available")
 	}
-	ttf, err := TrueType(testFontData(b))
-	if err != nil {
+	ttf := new(lefevre.Font)
+	if err := ttf.LoadBytes(testFontData(b), 0); err != nil {
 		b.Fatal(err)
 	}
 	for _, f := range []Font{std, ttf} {
-		b.Run(f.BaseName(), func(b *testing.B) {
+		b.Run(f.PostScriptName(), func(b *testing.B) {
 			var c Canvas
 			scratch := make([]byte, 4096)
 			c.Reset(scratch)
