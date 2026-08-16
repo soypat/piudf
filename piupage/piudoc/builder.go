@@ -128,6 +128,15 @@ func (bld *Builder) cellStyle() Style {
 // as a cell.
 func (bld *Builder) Cell(d Drawer) Cell { return Cell{Drawer: d} }
 
+// Row wraps drawers as a row of cells, one each.
+func (bld *Builder) Row(ds ...Drawer) []Cell {
+	row := make([]Cell, len(ds))
+	for i, d := range ds {
+		row[i] = Cell{Drawer: d}
+	}
+	return row
+}
+
 // TextRow builds a whole row of literal cells, which is what most rows are.
 func (bld *Builder) TextRow(texts ...string) []Cell {
 	row := make([]Cell, len(texts))
@@ -153,10 +162,6 @@ func (bld *Builder) Bookmark(title string, level int) Bookmark {
 // pack copies parsed pieces into memory the element owns: the words and link
 // targets end to end in one buffer, sized exactly once so that the views into it
 // cannot be invalidated as the rest go in, and the pieces as views of that.
-//
-// It is the hinge of the whole design. Before pack, everything points at the
-// builder and dies at the next parse; after it, the element points only at
-// itself, and the builder is free to go build the next one.
 func (bld *Builder) pack(src []atom) (text []byte, out []piece) {
 	if len(src) == 0 {
 		return nil, nil
@@ -200,6 +205,81 @@ func (bld *Builder) pack(src []atom) (text []byte, out []piece) {
 		out[i] = piece{text: word, font: a.font, size: a.size, col: a.col, href: packedHref, brk: a.brk}
 	}
 	return text, out
+}
+
+// ParagraphBuilder enables the concatenation of distinct
+// PDF elements commonly found in paragraphs like text, links, and markup.
+type ParagraphBuilder struct {
+	buf []byte
+}
+
+// Text adds raw text to paragraph.
+func (pb *ParagraphBuilder) Text(s string) *ParagraphBuilder {
+	pb.buf = appendEscaped(pb.buf, s)
+	return pb
+}
+
+// Markup adds markup to paragraph. See [Builder.P] documentation,
+func (pb *ParagraphBuilder) Markup(s string) *ParagraphBuilder {
+	pb.buf = append(pb.buf, s...)
+	return pb
+}
+
+// Link adds a href/anchor element to paragraph.
+func (pb *ParagraphBuilder) Link(text, uri string) *ParagraphBuilder {
+	pb.buf = append(pb.buf, `<a href="`...)
+	pb.buf = appendEscapedAttr(pb.buf, uri)
+	pb.buf = append(pb.buf, `">`...)
+	pb.buf = appendEscaped(pb.buf, text)
+	pb.buf = append(pb.buf, `</a>`...)
+	return pb
+}
+
+// Break adds a newline-like paragraph break.
+func (pb *ParagraphBuilder) Break() *ParagraphBuilder {
+	pb.buf = append(pb.buf, "<br/>"...)
+	return pb
+}
+
+func (pb *ParagraphBuilder) Reset() { pb.buf = pb.buf[:0] }
+
+func (pb *ParagraphBuilder) Build(bld *Builder, s Style) *Paragraph {
+	p := bld.build(bld.parser.parse(pb.buf, s), s)
+	pb.buf = pb.buf[:0]
+	return p
+}
+
+func appendEscaped(dst []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '&':
+			dst = append(dst, "&amp;"...)
+		case '<':
+			dst = append(dst, "&lt;"...)
+		case '>':
+			dst = append(dst, "&gt;"...)
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst
+}
+
+// appendEscapedAttr appends s to dst fit to sit inside the quotes of an href,
+// which is not the job appendEscaped does and does not have the same answer.
+func appendEscapedAttr(dst []byte, s string) []byte {
+	const hex = "0123456789ABCDEF"
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '&':
+			dst = append(dst, "&amp;"...)
+		case '<', '>', '"', '\'', ' ':
+			dst = append(dst, '%', hex[c>>4], hex[c&0xf])
+		default:
+			dst = append(dst, c)
+		}
+	}
+	return dst
 }
 
 // ErrKind is what a [Builder] found wrong.

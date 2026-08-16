@@ -164,11 +164,14 @@ func main() {
 	// The footnote's <a href> becomes a /Link annotation on whichever page it lands on.
 	footnote := small
 	footnote.Link = doc.LinkStyle{Color: canvas.HexColor("#0645AD"), Underline: true}
-	story = append(story, bld.P(
-		"Export of services rendered to a foreign customer. "+
-			"Not subject to local VAT — exportación de servicios. "+
-			`Terms at <a href="https://pkg.go.dev/github.com/soypat/piudf">pkg.go.dev/github.com/soypat/piudf</a>.`,
-		footnote))
+	var pb doc.ParagraphBuilder
+	story = append(story, pb.
+		Text("Export of services rendered to a foreign customer. ").
+		Text("Not subject to local VAT — exportación de servicios. ").
+		Text("Terms at ").
+		Link("pkg.go.dev/github.com/soypat/piudf", "https://pkg.go.dev/github.com/soypat/piudf").
+		Text(".").
+		Build(&bld, footnote))
 
 	// The document owns no memory of its own: the pages it may use, their
 	// content buffers and the encoder's are all supplied here.
