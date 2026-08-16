@@ -7,17 +7,12 @@ import (
 	"github.com/soypat/piudf/piupage"
 )
 
-// Cell is one table cell: either bare text (styled by the table's default cell
-// style) or an embedded Drawer such as a Paragraph or nested Table. The text is
-// caller-owned and read in place, on the same terms as [Paragraph.Text].
+// Cell is one table cell: the drawer it paints, which is a Paragraph a
+// [Builder] made or a nested Table. The zero Cell draws nothing and takes up no
+// height, which is how a row leaves a column empty.
 type Cell struct {
-	Text   []byte
 	Drawer Drawer
 }
-
-// TextCell wraps a string as a cell, converting once here so that drawing the
-// table never has to. A caller with a buffer of its own sets [Cell.Text].
-func TextCell(s string) Cell { return Cell{Text: []byte(s)} }
 
 // tableOpKind enumerates the typed TableStyle operations.
 type tableOpKind uint8
@@ -107,11 +102,6 @@ type Table struct {
 	Rows      [][]Cell
 	ColWidths []float64 // points
 	Style     TableStyle
-	// CellStyle is the default text style for bare-string cells.
-	CellStyle Style
-	// cell is the paragraph a bare-string cell is drawn as, reused across every
-	// such cell so that a table of text allocates nothing.
-	cell Paragraph
 }
 
 const defaultCellPad = 6
@@ -160,8 +150,12 @@ func (t *Table) rowHeight(dst []piupage.Canvas, f Frame, r int) (rowH float64, e
 		if ci >= len(t.ColWidths) {
 			break
 		}
+		dr := t.cellDrawer(ci, r)
+		if dr == nil {
+			continue
+		}
 		pl, pr, pt, pb := t.padding(ci, r)
-		h, err := Measure(dst, t.cellDrawer(ci, r), t.cellFrame(f, ci, pl, pr), f.Top)
+		h, err := Measure(dst, dr, t.cellFrame(f, ci, pl, pr), f.Top)
 		if err != nil {
 			return 0, err
 		}
@@ -194,10 +188,14 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 		if ci >= len(t.ColWidths) {
 			break
 		}
+		dr := t.cellDrawer(ci, r)
+		if dr == nil {
+			x += t.ColWidths[ci]
+			continue
+		}
 		pl, pr, pt, pb := t.padding(ci, r)
 		cf := t.cellFrame(f, ci, pl, pr)
 		cf.X = x + pl
-		dr := t.cellDrawer(ci, r)
 		cellTop := top - pt
 		// Only a vertically aligned cell needs its own height; a top-aligned one
 		// starts at the row's top edge whatever its extent.
@@ -213,7 +211,7 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 				cellTop -= inner - h
 			}
 		}
-		if _, _, err := dr.Draw(dst[:1], cf, cellTop); err != nil {
+		if _, _, err := drawCell(dst[:1], dr, cf, cellTop, t.align(ci, r)); err != nil {
 			return err
 		}
 		x += t.ColWidths[ci]
@@ -300,26 +298,21 @@ func (t *Table) colLeft(f Frame, ci int) float64 {
 	return x
 }
 
-// cellDrawer returns the drawer for cell (ci,r): its embedded Drawer, or the
-// table's reusable paragraph loaded with the cell's text.
-func (t *Table) cellDrawer(ci, r int) Drawer {
-	cell := t.Rows[r][ci]
-	if cell.Drawer != nil {
-		if p, ok := cell.Drawer.(*Paragraph); ok {
-			t.cell.CopyFrom(p)
-			t.cell.Style.Align = t.align(ci, r)
-			return &t.cell
-		}
-		return cell.Drawer
+// cellDrawer returns the drawer for cell (ci,r), which the cell now simply
+// holds: a paragraph a [Builder] parsed, or a nested table.
+func (t *Table) cellDrawer(ci, r int) Drawer { return t.Rows[r][ci].Drawer }
+
+// drawCell draws d with the column's alignment, without writing that alignment
+// into d. The paragraph may be one the caller built and reuses, and a table has
+// no business restyling it — the old way of doing this is API-REVIEW 2d.
+func drawCell(dst []piupage.Canvas, d Drawer, f Frame, yTop float64, a Align) (int, float64, error) {
+	if d == nil {
+		return 0, yTop, nil
 	}
-	st := t.CellStyle
-	if st.Size == 0 {
-		st = Normal
+	if p, ok := d.(*Paragraph); ok {
+		return p.drawAligned(dst, f, yTop, a)
 	}
-	st.Align = t.align(ci, r)
-	t.cell.Text = cell.Text
-	t.cell.Style = st
-	return &t.cell
+	return d.Draw(dst, f, yTop)
 }
 
 // padding resolves the cell's padding, defaulting to defaultCellPad on each side.

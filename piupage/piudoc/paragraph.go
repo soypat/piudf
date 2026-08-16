@@ -12,21 +12,26 @@ import (
 	"github.com/soypat/piudf/piupage"
 )
 
-// Paragraph is wrapped rich text. Text may carry a small markup subset —
-// <b>, <i>, <br/>, <font size= color=> — with unknown tags ignored. Style
-// supplies the defaults.
+// Paragraph is wrapped rich text, parsed once by a [Builder] and drawn as often
+// as the story needs. Build one with [Builder.Text] for literal text or
+// [Builder.P] for markup.
+//
+// It owns every byte it draws and holds no scratch: drawing reads it and writes
+// nothing. That is what makes a table cheap — a row is measured by drawing it
+// and retracting, so every cell is drawn twice, and neither pass parses.
 type Paragraph struct {
-	Text  []byte
 	Style Style
-	// parser holds the words the markup parses to and the memory they view; see
-	// [atomParser]. line is the one line currently being filled. Both are scratch
-	// reused across draws.
-	parser atomParser
-	line   []piece
+	// text holds the paragraph's words and link targets packed end to end, and
+	// line is the pieces viewing it. Both are sized once, by [Builder.pack], and
+	// nothing here points at the builder that made it or at the text the caller
+	// passed in.
+	text []byte
+	line []piece
 }
 
-// piece is a run of same-style text within a laid-out line. Its text and href
-// are the atom's views carried one step further; see [atom].
+// piece is one word with the style the markup resolved for it, or an explicit
+// break. Its text and href are views into the paragraph's own buffer — the same
+// views [atom] carried, copied one last time by [Builder.pack].
 type piece struct {
 	text []byte
 	font piupage.Font
@@ -34,95 +39,66 @@ type piece struct {
 	col  color.Color
 	// href is the link target the piece belongs to, empty for ordinary text.
 	href []byte
-}
-
-// spaceWord is the text of the pieces holding the gaps between words. They
-// advance the cursor and draw nothing: a PDF text run needs no space glyph.
-var spaceWord = []byte(" ")
-
-// isSpaceWord reports whether the piece is one of those gaps. It is an identity
-// test, not a comparison: every gap is this one slice, and no word ever is.
-func isSpaceWord(b []byte) bool { return len(b) == 1 && &b[0] == &spaceWord[0] }
-
-// P constructs a Paragraph from text and a style. It is the convenience door
-// for text a program has as a string: the conversion copies once, here, and
-// never again. A caller with a buffer of its own sets [Paragraph.Text] instead.
-func P(text string, s Style) *Paragraph { return &Paragraph{Text: []byte(text), Style: s} }
-
-// CopyFrom loads src's text and style into p, keeping p's own scratch. It is how
-// one paragraph is reused to draw many: p parses into the buffers it has already
-// grown, and src is only read.
-//
-// The scratch is what must not come across. Those buffers belong to the
-// paragraph that grew them — taking src's would have p's next draw write through
-// into memory src owns, and would hand p's own away one source at a time.
-func (p *Paragraph) CopyFrom(src *Paragraph) {
-	p.Text = append(p.Text[:0], src.Text...)
-	p.line = append(p.line[:0], src.line...)
-	p.Style = src.Style
+	// brk marks an explicit <br/>: it carries no text and ends the line.
+	brk bool
 }
 
 // Draw breaks the text greedily to the frame's width and paints it from yTop
 // down, continuing onto further pages as it fills them.
 func (p *Paragraph) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
+	return p.drawAligned(dst, f, yTop, p.Style.Align)
+}
+
+// drawAligned is [Paragraph.Draw] with an alignment imposed from outside, which
+// is how a table aligns a cell without writing to a paragraph it does not own.
+func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a Align) (adv int, yEnd float64, err error) {
 	avail := f.Width - p.Style.LeftIndent - p.Style.RightIndent
 	if avail <= 0 {
 		return 0, yTop, nil
 	}
-	atoms := p.parser.parse(p.Text, p.Style)
-	p.line = p.line[:0]
-
 	y := yTop - p.Style.SpaceBefore
+	// A line is a range of the pieces, so wrapping needs no buffer of its own:
+	// start is where the line being filled began.
+	start := 0
 	var lineW, maxSize float64
-	for _, a := range atoms {
-		if a.brk {
-			adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+	for i := range p.line {
+		pc := &p.line[i]
+		if pc.brk {
+			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, a)
 			if err != nil {
 				return adv, y, err
 			}
-			lineW, maxSize = 0, 0
+			start, lineW, maxSize = i+1, 0, 0
 			continue
 		}
-		wordW := piupage.StringWidth(a.font, b2s(a.word), a.size)
+		wordW := piupage.StringWidth(pc.font, b2s(pc.text), pc.size)
 		space := 0.0
-		if len(p.line) > 0 {
-			space = piupage.StringWidth(a.font, " ", a.size)
+		if i > start {
+			space = piupage.StringWidth(pc.font, " ", pc.size)
 		}
-		if len(p.line) > 0 && lineW+space+wordW > avail {
-			adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+		if i > start && lineW+space+wordW > avail {
+			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, a)
 			if err != nil {
 				return adv, y, err
 			}
-			lineW, maxSize, space = 0, 0, 0
+			start, lineW, maxSize, space = i, 0, 0, 0
 		}
-		if space > 0 {
-			// The space belongs to a link only when it sits between two words
-			// of the same one. Giving it the incoming atom's href would let a
-			// link's rectangle swallow the space in front of it.
-			var href []byte
-			if prev := p.line[len(p.line)-1]; bytes.Equal(prev.href, a.href) {
-				href = a.href
-			}
-			p.line = append(p.line, piece{spaceWord, a.font, a.size, a.col, href})
-			lineW += space
-		}
-		p.line = append(p.line, piece{a.word, a.font, a.size, a.col, a.href})
-		lineW += wordW
-		if a.size > maxSize {
-			maxSize = a.size
+		lineW += space + wordW
+		if pc.size > maxSize {
+			maxSize = pc.size
 		}
 	}
-	adv, y, err = p.emitLine(dst, f, adv, y, avail, lineW, maxSize)
+	adv, y, err = p.emitLine(dst, f, p.line[start:], adv, y, avail, lineW, maxSize, a)
 	if err != nil {
 		return adv, y, err
 	}
 	return adv, y - p.Style.SpaceAfter, nil
 }
 
-// emitLine paints the line assembled in p.line at the cursor, moving to the
-// next page first if the line no longer fits on this one. It reports the page
-// and cursor the paragraph continues from, and empties p.line.
-func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, lineW, maxSize float64) (int, float64, error) {
+// emitLine paints one line's pieces at the cursor, moving to the next page
+// first if the line no longer fits on this one. It reports the page and cursor
+// the paragraph continues from.
+func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv int, y, avail, lineW, maxSize float64, a Align) (int, float64, error) {
 	lineH := p.Style.leading()
 	// A line that does not fit moves to the next page — unless the cursor is
 	// already at the top of one, in which case no amount of breaking will help
@@ -137,7 +113,7 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, l
 	cv := &dst[adv]
 	x0 := f.X + p.Style.LeftIndent
 	startX := x0
-	switch p.Style.Align {
+	switch a {
 	case Right:
 		startX = x0 + avail - lineW
 	case Center:
@@ -152,8 +128,25 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, l
 	// here and resumes on the next line, which is exactly the rect a reader
 	// wants.
 	var runHref []byte
-	runX := 0.0
-	for _, pc := range p.line {
+	runX := startX
+	for i := range line {
+		pc := &line[i]
+		if i > 0 {
+			// The gap between two words is not stored, only stepped over: a PDF
+			// text run needs no space glyph. It belongs to a link when it sits
+			// between two words of the same one, and to neither otherwise —
+			// giving it a neighbour's href unconditionally would let that link's
+			// rectangle swallow the space beside it.
+			var spHref []byte
+			if bytes.Equal(line[i-1].href, pc.href) {
+				spHref = pc.href
+			}
+			if !bytes.Equal(spHref, runHref) {
+				p.closeRun(cv, runHref, runX, px, base, h)
+				runHref, runX = spHref, px
+			}
+			px += piupage.StringWidth(pc.font, " ", pc.size)
+		}
 		if !bytes.Equal(pc.href, runHref) {
 			p.closeRun(cv, runHref, runX, px, base, h)
 			runHref, runX = pc.href, px
@@ -161,14 +154,11 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, adv int, y, avail, l
 		// b2s is safe here and in closeRun for one reason: neither callee keeps
 		// the string. Text encodes it into the content stream before it returns
 		// and StringWidth only measures it, so no view outlives the call.
-		if !isSpaceWord(pc.text) {
-			cv.SetFont(pc.font, pc.size)
-			cv.Text(px, base, b2s(pc.text), pc.col)
-		}
+		cv.SetFont(pc.font, pc.size)
+		cv.Text(px, base, b2s(pc.text), pc.col)
 		px += piupage.StringWidth(pc.font, b2s(pc.text), pc.size)
 	}
 	p.closeRun(cv, runHref, runX, px, base, h)
-	p.line = p.line[:0]
 	return adv, y - lineH, nil
 }
 
@@ -243,6 +233,28 @@ func (ap *atomParser) resolve(v []byte) []byte {
 	return ap.esc[start:]
 }
 
+// baseSpan is the span a style starts in, before any tag has opened. Weight and
+// slant come from the family name, so a Helvetica-Bold style is already bold and
+// a <b> inside it changes nothing.
+func baseSpan(base Style) spanStyle {
+	return spanStyle{
+		size: base.Size,
+		col:  base.color(),
+		bold: strings.Contains(base.family(), "Bold"),
+		ital: strings.Contains(base.family(), "Oblique") || strings.Contains(base.family(), "Italic"),
+	}
+}
+
+// parseText is [atomParser.parse] for literal text: no tag is recognized and no
+// entity is resolved, so the whole of it is one run and the scanner never runs.
+// It is the cheaper of the two doors as well as the safe one.
+func (ap *atomParser) parseText(text []byte, base Style) []atom {
+	ap.atoms = ap.atoms[:0]
+	ap.esc = ap.esc[:0]
+	ap.appendWordsRaw(text, baseSpan(base), baseFamily(base.family()))
+	return ap.atoms
+}
+
 // parse scans text's markup subset into styled word atoms. The result is the
 // parser's own slice and stays valid until the next call, as do the words in it.
 func (ap *atomParser) parse(text []byte, base Style) []atom {
@@ -253,14 +265,8 @@ func (ap *atomParser) parse(text []byte, base Style) []atom {
 		internal.SliceReuse(&ap.esc, len(text))
 	}
 	family := baseFamily(base.family())
-	top := spanStyle{
-		size: base.Size,
-		col:  base.color(),
-		bold: strings.Contains(base.family(), "Bold"),
-		ital: strings.Contains(base.family(), "Oblique") || strings.Contains(base.family(), "Italic"),
-	}
 	var stackArr [8]spanStyle
-	stack := append(stackArr[:0], top)
+	stack := append(stackArr[:0], baseSpan(base))
 
 	for i := 0; i < len(text); {
 		if text[i] != '<' {
@@ -330,6 +336,12 @@ func (ap *atomParser) appendWords(s []byte, cur spanStyle, family string) {
 		ap.esc = appendUnescaped(ap.esc, b2s(s))
 		s = ap.esc[start:]
 	}
+	ap.appendWordsRaw(s, cur, family)
+}
+
+// appendWordsRaw splits s where it lies, resolving nothing. Every word is a view
+// into s, so a run costs one atom per word and not a byte more.
+func (ap *atomParser) appendWordsRaw(s []byte, cur spanStyle, family string) {
 	f := resolveFont(family, cur.bold, cur.ital)
 	for i := 0; i < len(s); {
 		for i < len(s) && isSpace(s[i]) {
@@ -476,4 +488,11 @@ func indexAttr(tag []byte, name string) int {
 
 func b2s(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+// s2b views s as bytes, so that the string doors and the byte doors reach the
+// parser through one path. Nothing writes through it: the parser's only writes
+// go to its own esc buffer.
+func s2b(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }

@@ -2,3 +2,4 @@
 
 invoice.pdf
 *.test
+*local.*

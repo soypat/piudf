@@ -30,7 +30,7 @@ func TestTableRowHeightFromTallestCell(t *testing.T) {
 	// met — or that had to draw cell 0 before measuring cell 2 — would get this
 	// wrong.
 	tbl := &Table{
-		Rows:      [][]Cell{{TextCell("x"), TextCell("y"), TextCell("a<br/>b<br/>c")}},
+		Rows:      [][]Cell{{bld.TextCell("x"), bld.TextCell("y"), bld.MarkupCell("a<br/>b<br/>c")}},
 		ColWidths: []float64{60, 60, 60},
 	}
 	dst := newCanvases(t, 1)
@@ -53,8 +53,8 @@ func TestTableSplitsBetweenRows(t *testing.T) {
 	rowH := 3*lineH + 2*cellPad // 48
 	tbl := &Table{
 		Rows: [][]Cell{
-			{TextCell("a<br/>b<br/>c")},
-			{TextCell("d<br/>e<br/>f")},
+			{bld.MarkupCell("a<br/>b<br/>c")},
+			{bld.MarkupCell("d<br/>e<br/>f")},
 		},
 		ColWidths: []float64{100},
 	}
@@ -80,8 +80,8 @@ func TestTableSplitsBetweenRows(t *testing.T) {
 func TestTableShortBuffer(t *testing.T) {
 	tbl := &Table{
 		Rows: [][]Cell{
-			{TextCell("a<br/>b<br/>c")},
-			{TextCell("d<br/>e<br/>f")},
+			{bld.MarkupCell("a<br/>b<br/>c")},
+			{bld.MarkupCell("d<br/>e<br/>f")},
 		},
 		ColWidths: []float64{100},
 	}
@@ -95,7 +95,7 @@ func TestTableShortBuffer(t *testing.T) {
 func TestMeasureLeavesNoTrace(t *testing.T) {
 	dst := newCanvases(t, 1)
 	f := Frame{X: 0, Width: 200, Top: 500, Bottom: 0}
-	p := P("one two three four five six seven eight", Normal)
+	p := bld.P("one two three four five six seven eight", Normal)
 
 	dst[0].SetFont(mustFont(t, "Helvetica"), 10)
 	dst[0].Text(0, 400, "before", nil)
@@ -130,7 +130,7 @@ func TestParagraphSplitsAcrossPages(t *testing.T) {
 	dst := newCanvases(t, 3)
 	// Four lines, room for two per page.
 	f := Frame{X: 0, Width: 200, Top: 100, Bottom: 100 - 2*lineH}
-	p := P("a<br/>b<br/>c<br/>d", Normal)
+	p := bld.P("a<br/>b<br/>c<br/>d", Normal)
 
 	adv, yEnd, err := p.Draw(dst, f, f.Top)
 	if err != nil {
@@ -151,14 +151,14 @@ func TestDocBuildPages(t *testing.T) {
 	var buf bytes.Buffer
 	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}, Title: "t", Author: "a"}
 	story := []Drawer{
-		P("first", Heading1),
+		bld.P("first", Heading1),
 		Spacer{H: 12},
 		HRule{Thickness: 1},
 		&Table{
-			Rows:      [][]Cell{{TextCell("h1"), TextCell("h2")}, {TextCell("v1"), TextCell("v2")}},
+			Rows:      [][]Cell{{bld.TextCell("h1"), bld.TextCell("h2")}, {bld.TextCell("v1"), bld.TextCell("v2")}},
 			ColWidths: []float64{100, 100},
 		},
-		P("last", Normal),
+		bld.P("last", Normal),
 	}
 	dst := make([]piupage.Canvas, 4)
 	err := d.Build(&buf, dst, story, make([]byte, 4096), make([]byte, 4*1024))
@@ -182,7 +182,7 @@ func TestDocBuildPages(t *testing.T) {
 
 func TestDocBuildReuse(t *testing.T) {
 	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}}
-	story := []Drawer{P("hello", Normal)}
+	story := []Drawer{bld.P("hello", Normal)}
 	dst := make([]piupage.Canvas, 2)
 	var first bytes.Buffer
 	for i := range 3 {
@@ -212,7 +212,8 @@ func mustFont(t testing.TB, name string) piupage.Font {
 // same one used in two columns must come out of the draw exactly as it went in —
 // and must not have been used as the table's scratch on the way through.
 func TestTableDoesNotRestyleTheCallersParagraph(t *testing.T) {
-	p := P("shared between both columns", Normal)
+	p := bld.P("shared between both columns", Normal)
+	nline, text0 := len(p.line), &p.text[0]
 	var ts TableStyle
 	ts.Align(1, 0, 1, 0, Right)
 	tbl := &Table{
@@ -231,9 +232,10 @@ func TestTableDoesNotRestyleTheCallersParagraph(t *testing.T) {
 	if p.Style.Align != Left {
 		t.Errorf("the table wrote its alignment back into the caller: Align = %v", p.Style.Align)
 	}
-	// The paragraph was never drawn on its own, so nothing should ever have
-	// parsed into its buffers: the table has scratch of its own for that.
-	if p.parser.atoms != nil || p.parser.esc != nil || p.line != nil {
-		t.Error("the table parsed into the caller's paragraph rather than its own")
+	// And nothing was written into the paragraph on the way through. It came out
+	// of the builder finished; drawing it — twice per cell, four times over this
+	// table — only reads it.
+	if len(p.line) != nline || &p.text[0] != text0 {
+		t.Error("the table wrote into the caller's paragraph rather than reading it")
 	}
 }

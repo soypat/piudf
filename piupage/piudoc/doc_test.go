@@ -27,6 +27,10 @@ func (l linker) Draw(dst []piupage.Canvas, f Frame, yTop float64) (int, float64,
 }
 
 // build runs a one-shot document and returns its bytes.
+// bld is the package's test builder. Sharing one across every test is the shape
+// a document has: one builder, many elements, its buffers reused throughout.
+var bld Builder
+
 func build(t testing.TB, d *Doc, story []Drawer, pages int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -59,7 +63,7 @@ func TestDocWritesAnnots(t *testing.T) {
 
 func TestDocOmitsEmptyAnnots(t *testing.T) {
 	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}}
-	out := build(t, d, []Drawer{P("no links here", Normal)}, 1)
+	out := build(t, d, []Drawer{bld.P("no links here", Normal)}, 1)
 	if bytes.Contains(out, []byte("/Annots")) {
 		t.Error("wrote an empty /Annots array")
 	}
@@ -101,7 +105,7 @@ func TestParagraphLinkAnnotations(t *testing.T) {
 	st.Link = LinkStyle{Underline: true}
 	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}}
 	out := build(t, d, []Drawer{
-		P(`see <a href="https://go.dev/doc">the docs</a> for more`, st),
+		bld.P(`see <a href="https://go.dev/doc">the docs</a> for more`, st),
 	}, 1)
 
 	if got := bytes.Count(out, []byte("/Subtype/Link")); got != 1 {
