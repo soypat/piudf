@@ -48,19 +48,21 @@ func main() {
 		Author:  "Jane Doe",
 	}
 
+	// One builder parses the whole document, and every paragraph it makes is
+	// finished when it comes back: the story below draws without parsing again.
+	var bld doc.Builder
 	var story []doc.Drawer
 
 	// Header: title + invoice meta.
 	var metaStyle doc.TableStyle
-	metaStyle.Valign(0, 0, -1, -1, doc.Top).
-		Align(1, 0, 1, 0, doc.Right).
-		Pad(0, 0, -1, -1, 0, 0, 0, 0)
+	metaStyle.All().Valign(doc.Top)
+	metaStyle.Range(1, 0, 1, 0).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{118 * mm, 48 * mm},
 		Style:     metaStyle,
 		Rows: [][]doc.Cell{{
-			doc.Cell{Drawer: doc.P("COMMERCIAL INVOICE", h1)},
-			doc.Cell{Drawer: doc.P(
+			doc.Cell{Drawer: bld.Text("COMMERCIAL INVOICE", h1)},
+			doc.Cell{Drawer: bld.P(
 				`<font size="8" color="#555555">INVOICE No.</font><br/>`+
 					`<b>0001-2026</b><br/>`+
 					`<font size="8" color="#555555">DATE</font><br/>`+
@@ -72,14 +74,14 @@ func main() {
 	story = append(story, doc.Spacer{H: 12})
 
 	// From / To.
-	seller := doc.P(
+	seller := bld.P(
 		`<font size="8" color="#555555"><b>FROM (SELLER)</b></font><br/>`+
 			`<b>Jane Doe</b><br/>`+
 			`Independent Software Developer<br/>`+
 			`123 Example Avenue (A0000)<br/>`+
 			`Sample City, Country<br/>`+
 			`Tax ID: 00-00000000-0`, base)
-	buyer := doc.P(
+	buyer := bld.P(
 		`<font size="8" color="#555555"><b>BILL TO (BUYER)</b></font><br/>`+
 			`<b>Acme GmbH</b><br/>`+
 			"c/o Beispielstraße 2-4<br/>"+
@@ -87,16 +89,17 @@ func main() {
 			`Germany<br/>`+
 			`Amtsgericht Berlin (Charlottenburg), HRB 000000 B`, base)
 	var ftStyle doc.TableStyle
-	ftStyle.Valign(0, 0, -1, -1, doc.Top).Pad(0, 0, -1, -1, 0, 0, 0, 0)
+	ftStyle.All().Valign(doc.Top)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{83 * mm, 83 * mm},
 		Style:     ftStyle,
 		Rows:      [][]doc.Cell{{doc.Cell{Drawer: seller}, doc.Cell{Drawer: buyer}}},
 	})
+
 	story = append(story, doc.Spacer{H: 16})
 
 	// Line items.
-	desc := doc.P(
+	desc := bld.P(
 		"<b>Software development services — milestone payment</b><br/>"+
 			"Integration of networking stack into a client VPN software "+
 			"(overlay network). Design, implementation and testing "+
@@ -104,45 +107,43 @@ func main() {
 			`<font size="8" color="#555555">Service period: June – July 2026. `+
 			"Services rendered remotely.</font>", base)
 	var itemsStyle doc.TableStyle
-	itemsStyle.
-		LineBelow(0, 0, -1, 0, 0.8, DARK).
-		LineBelow(0, 1, -1, 1, 0.4, LIGHT).
-		Valign(0, 0, -1, -1, doc.Top).
-		Align(1, 0, 1, -1, doc.Right).
-		Pad(0, 0, -1, -1, 0, 0, 2, 2).
-		Pad(0, 1, -1, 1, 0, 0, 8, 10)
+	itemsStyle.All().Valign(doc.Top).Pad(doc.Padding{Top: 2, Bottom: 2})
+	itemsStyle.Row(0).LineBelow(0.8, DARK)
+	itemsStyle.Row(1).LineBelow(0.4, LIGHT).Pad(doc.Padding{Top: 8, Bottom: 10})
+	itemsStyle.Col(1).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{136 * mm, 30 * mm},
 		Style:     itemsStyle,
 		Rows: [][]doc.Cell{
-			{doc.Cell{Drawer: doc.P("<b>DESCRIPTION</b>", smallBold)}, doc.Cell{Drawer: doc.P("<b>AMOUNT (USD)</b>", smallBold)}},
-			{doc.Cell{Drawer: desc}, doc.Cell{Drawer: doc.P("343.00", base)}},
+			{doc.Cell{Drawer: bld.P("<b>DESCRIPTION</b>", smallBold)}, doc.Cell{Drawer: bld.P("<b>AMOUNT (USD)</b>", smallBold)}},
+			{doc.Cell{Drawer: desc}, doc.Cell{Drawer: bld.Text("343.00", base)}},
 		},
 	})
 	story = append(story, doc.Spacer{H: 4})
 
 	// Totals.
 	var totStyle doc.TableStyle
-	totStyle.Align(1, 0, -1, -1, doc.Right).Pad(0, 0, -1, -1, 0, 0, 2, 2)
+	totStyle.All().Pad(doc.Padding{Top: 2, Bottom: 2})
+	totStyle.Range(1, 0, -1, -1).Align(doc.Right)
 	story = append(story, &doc.Table{
 		ColWidths: []float64{96 * mm, 40 * mm, 30 * mm},
 		Style:     totStyle,
 		Rows: [][]doc.Cell{{
-			doc.TextCell(""),
-			doc.Cell{Drawer: doc.P(`<font size="8" color="#555555">TOTAL</font>`, base)},
-			doc.Cell{Drawer: doc.P("<b>USD 343.00</b>", tot)},
+			doc.Cell{},
+			doc.Cell{Drawer: bld.P(`<font size="8" color="#555555">TOTAL</font>`, base)},
+			doc.Cell{Drawer: bld.P("<b>USD 343.00</b>", tot)},
 		}},
 	})
 	story = append(story, doc.Spacer{H: 18})
 
 	// Payment details.
-	story = append(story, doc.P("<b>PAYMENT DETAILS</b>", label))
+	story = append(story, bld.P("<b>PAYMENT DETAILS</b>", label))
 	story = append(story, doc.Spacer{H: 3})
 	payRow := func(k, v string) []doc.Cell {
-		return []doc.Cell{{Drawer: doc.P(k, small)}, {Drawer: doc.P(v, base)}}
+		return []doc.Cell{{Drawer: bld.P(k, small)}, {Drawer: bld.P(v, base)}}
 	}
 	var payStyle doc.TableStyle
-	payStyle.Valign(0, 0, -1, -1, doc.Top).Pad(0, 0, -1, -1, 0, 6, 0, 3)
+	payStyle.All().Valign(doc.Top).Pad(doc.Padding{Right: 6, Bottom: 3})
 	story = append(story, &doc.Table{
 		ColWidths: []float64{52 * mm, 114 * mm},
 		Style:     payStyle,
@@ -163,14 +164,21 @@ func main() {
 	// The footnote's <a href> becomes a /Link annotation on whichever page it lands on.
 	footnote := small
 	footnote.Link = doc.LinkStyle{Color: canvas.HexColor("#0645AD"), Underline: true}
-	story = append(story, doc.P(
-		"Export of services rendered to a foreign customer. "+
-			"Not subject to local VAT — exportación de servicios. "+
-			`Terms at <a href="https://pkg.go.dev/github.com/soypat/piudf">pkg.go.dev/github.com/soypat/piudf</a>.`,
-		footnote))
+	var pb doc.ParagraphBuilder
+	story = append(story, pb.
+		Text("Export of services rendered to a foreign customer. ").
+		Text("Not subject to local VAT — exportación de servicios. ").
+		Text("Terms at ").
+		Link("pkg.go.dev/github.com/soypat/piudf", "https://pkg.go.dev/github.com/soypat/piudf").
+		Text(".").
+		Build(&bld, footnote))
 
 	// The document owns no memory of its own: the pages it may use, their
 	// content buffers and the encoder's are all supplied here.
+	if err := bld.Err(); err != nil {
+		fatal(err)
+	}
+
 	const maxPages = 4
 	pages := make([]canvas.Canvas, maxPages)
 	if err := d.Build(f, pages, story, make([]byte, 4096), make([]byte, maxPages*4096)); err != nil {

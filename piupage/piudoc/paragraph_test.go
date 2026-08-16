@@ -97,7 +97,7 @@ func TestParagraphLinkWrapsToOneRectPerLine(t *testing.T) {
 	f := Frame{X: 0, Width: 200, Top: 500, Bottom: 0}
 	// The break forces the link onto two lines; PDF has no multi-line
 	// annotation, so it must become two rects and not one tall or one wide.
-	p := P(`<a href="https://go.dev">first<br/>second</a>`, Normal)
+	p := bld.P(`<a href="https://go.dev">first<br/>second</a>`, Normal)
 	if _, _, err := p.Draw(dst, f, f.Top); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestParagraphLinkWrapsToOneRectPerLine(t *testing.T) {
 func TestParagraphLinkCoalescesWords(t *testing.T) {
 	dst := newCanvases(t, 1)
 	f := Frame{X: 0, Width: 400, Top: 500, Bottom: 0}
-	p := P(`x <a href="u">one two three</a> y`, Normal)
+	p := bld.P(`x <a href="u">one two three</a> y`, Normal)
 	if _, _, err := p.Draw(dst, f, f.Top); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestParagraphLinkUnderline(t *testing.T) {
 	f := Frame{X: 0, Width: 400, Top: 500, Bottom: 0}
 	draw := func(st Style) string {
 		dst := newCanvases(t, 1)
-		p := P(`<a href="u">linked</a>`, st)
+		p := bld.P(`<a href="u">linked</a>`, st)
 		if _, _, err := p.Draw(dst, f, f.Top); err != nil {
 			t.Fatal(err)
 		}
@@ -167,37 +167,48 @@ func TestParseAtomsReusesBuffer(t *testing.T) {
 	}
 }
 
-// The parser hands out views into the caller's text, which is only sound if it
-// never writes to it — including for the text it has to resolve entities in.
+// The parser reads the caller's buffer and packs what it finds into the
+// paragraph, which is only sound if it never writes to the buffer on the way —
+// including for the text it has to resolve entities in.
 func TestParseDoesNotWriteToText(t *testing.T) {
 	const src = `Tom &amp; Jerry <a href="u?x=1&amp;y=2">&lt;docs&gt;</a> &#160; end`
 	text := []byte(src)
-	p := &Paragraph{Text: text, Style: Normal}
+	p := bld.PBytes(text, Normal)
+	if string(text) != src {
+		t.Fatalf("building wrote to the caller's text:\n got %q\nwant %q", text, src)
+	}
+	// And the paragraph must not be a view of it either: scribbling over the
+	// source afterwards cannot change what draws.
 	f := Frame{X: 0, Width: 200, Top: 500, Bottom: 0}
-	for i := range 2 {
-		dst := newCanvases(t, 1)
-		if _, _, err := p.Draw(dst, f, f.Top); err != nil {
-			t.Fatalf("draw %d: %v", i, err)
-		}
-		if string(text) != src {
-			t.Fatalf("draw %d wrote to the caller's text:\n got %q\nwant %q", i, text, src)
-		}
+	dst := newCanvases(t, 1)
+	if _, _, err := p.Draw(dst, f, f.Top); err != nil {
+		t.Fatal(err)
+	}
+	want := string(dst[0].Bytes())
+	for i := range text {
+		text[i] = 'z'
+	}
+	dst = newCanvases(t, 1)
+	if _, _, err := p.Draw(dst, f, f.Top); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(dst[0].Bytes()); got != want {
+		t.Error("the paragraph drew the caller's buffer, not its own copy")
 	}
 }
 
-// A table draws every bare-string cell through one shared Paragraph, so the
-// second cell's parse reuses the buffers the first cell's link target was a view
-// into. The annotation has to have copied it by then.
+// Every element of a document is parsed through one builder, so the second
+// paragraph's parse writes over the buffers the first one's link target came
+// out of. Both have to have been packed by then.
 func TestLinkSurvivesTheNextParse(t *testing.T) {
 	dst := newCanvases(t, 1)
 	f := Frame{X: 0, Width: 400, Top: 500, Bottom: 0}
-	var p Paragraph
-	p.Style = Normal
-	for i, src := range []string{
-		`<a href="https://a.test/?x=1&amp;y=2">first</a> and some more words after it`,
-		`<a href="https://b.test/?p=3&amp;q=4">second</a>`,
-	} {
-		p.Text = []byte(src)
+	var b Builder
+	ps := []*Paragraph{
+		b.P(`<a href="https://a.test/?x=1&amp;y=2">first</a> and some more words after it`, Normal),
+		b.P(`<a href="https://b.test/?p=3&amp;q=4">second</a>`, Normal),
+	}
+	for i, p := range ps {
 		if _, _, err := p.Draw(dst, f, f.Top-float64(i)*20); err != nil {
 			t.Fatal(err)
 		}

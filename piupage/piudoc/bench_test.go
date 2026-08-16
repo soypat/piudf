@@ -28,7 +28,7 @@ func BenchmarkParagraphDrawEntities(b *testing.B) {
 	var cv [1]piupage.Canvas
 	buf := make([]byte, 8192)
 	f := Frame{X: 72, Width: 451, Top: 770, Bottom: 72}
-	p := P(benchEntityText, Normal)
+	p := bld.P(benchEntityText, Normal)
 	b.ReportAllocs()
 	for b.Loop() {
 		cv[0].Reset(buf)
@@ -45,7 +45,7 @@ func BenchmarkParagraphDrawLinks(b *testing.B) {
 	f := Frame{X: 72, Width: 451, Top: 770, Bottom: 72}
 	st := Normal
 	st.Link = LinkStyle{Color: piupage.HexColor("#0645AD"), Underline: true}
-	p := P(benchLinkText, st)
+	p := bld.P(benchLinkText, st)
 	b.ReportAllocs()
 	for b.Loop() {
 		cv[0].Reset(buf)
@@ -60,7 +60,7 @@ func BenchmarkParagraphDraw(b *testing.B) {
 	var cv [1]piupage.Canvas
 	buf := make([]byte, 4096)
 	f := Frame{X: 72, Width: 451, Top: 770, Bottom: 72}
-	p := P(benchText, Normal)
+	p := bld.P(benchText, Normal)
 	b.ReportAllocs()
 	for b.Loop() {
 		cv[0].Reset(buf)
@@ -76,7 +76,7 @@ func BenchmarkParagraphMeasure(b *testing.B) {
 	buf := make([]byte, 4096)
 	cv[0].Reset(buf)
 	f := Frame{X: 72, Width: 451, Top: 770, Bottom: 72}
-	p := P(benchText, Normal)
+	p := bld.P(benchText, Normal)
 	b.ReportAllocs()
 	for b.Loop() {
 		_, err := Measure(cv[:], p, f, f.Top)
@@ -92,10 +92,11 @@ func BenchmarkTableDraw(b *testing.B) {
 	f := Frame{X: 72, Width: 450, Top: 770, Bottom: 72}
 	rows := make([][]Cell, 12)
 	for i := range rows {
-		rows[i] = []Cell{TextCell("left"), TextCell("a middle column"), TextCell("42.00")}
+		rows[i] = []Cell{bld.TextCell("left"), bld.TextCell("a middle column"), bld.TextCell("42.00")}
 	}
 	t := &Table{Rows: rows, ColWidths: []float64{150, 200, 100}}
-	t.Style.Grid(0, 0, -1, -1, 0.5, nil).Background(0, 0, -1, 0, nil).Valign(0, 0, -1, -1, Middle)
+	t.Style.All().Grid(0.5, nil).Valign(Middle)
+	t.Style.Row(0).Background(nil)
 	b.ReportAllocs()
 	for b.Loop() {
 		cv[0].Reset(buf)
@@ -113,7 +114,7 @@ func BenchmarkDocBuild(b *testing.B) {
 	encBuf := make([]byte, 4096)
 	story := make([]Drawer, 24)
 	for i := range story {
-		story[i] = P(benchText, Normal)
+		story[i] = bld.P(benchText, Normal)
 	}
 	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}, Title: "bench"}
 	b.ReportAllocs()

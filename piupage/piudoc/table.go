@@ -4,20 +4,16 @@ import (
 	"image/color"
 	"io"
 
+	"github.com/soypat/piudf/internal"
 	"github.com/soypat/piudf/piupage"
 )
 
-// Cell is one table cell: either bare text (styled by the table's default cell
-// style) or an embedded Drawer such as a Paragraph or nested Table. The text is
-// caller-owned and read in place, on the same terms as [Paragraph.Text].
+// Cell is one table cell: the drawer it paints, which is a Paragraph a
+// [Builder] made or a nested Table. The zero Cell draws nothing and takes up no
+// height, which is how a row leaves a column empty.
 type Cell struct {
-	Text   []byte
 	Drawer Drawer
 }
-
-// TextCell wraps a string as a cell, converting once here so that drawing the
-// table never has to. A caller with a buffer of its own sets [Cell.Text].
-func TextCell(s string) Cell { return Cell{Text: []byte(s)} }
 
 // tableOpKind enumerates the typed TableStyle operations.
 type tableOpKind uint8
@@ -45,89 +41,143 @@ type tableOp struct {
 	v              VAlign
 }
 
-// TableStyle is a typed builder of per-cell-range formatting. Its methods chain
-// and apply in insertion order; later directives override earlier ones.
+// TableStyle is a typed builder of per-cell-range formatting.z
 type TableStyle struct {
 	ops []tableOp
 }
 
 func (ts *TableStyle) Reset() { ts.ops = ts.ops[:0] }
 
-// Align sets horizontal alignment over the cell range.
-func (ts *TableStyle) Align(c0, r0, c1, r1 int, a Align) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opAlign, c0: c0, r0: r0, c1: c1, r1: r1, a: a})
-	return ts
+// Sel is a range of cells being styled.
+type Sel struct {
+	ts             *TableStyle
+	c0, r0, c1, r1 int
 }
 
-// Valign sets vertical alignment over the cell range.
-func (ts *TableStyle) Valign(c0, r0, c1, r1 int, v VAlign) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opValign, c0: c0, r0: r0, c1: c1, r1: r1, v: v})
-	return ts
+// All selects every cell of the table.
+func (ts *TableStyle) All() Sel { return Sel{ts, 0, 0, -1, -1} }
+
+// Row selects row r entire. A negative r counts from the last row.
+func (ts *TableStyle) Row(r int) Sel { return Sel{ts, 0, r, -1, r} }
+
+// Col selects column c entire. A negative c counts from the last column.
+func (ts *TableStyle) Col(c int) Sel { return Sel{ts, c, 0, c, -1} }
+
+// Range selects the cells between two corners, -1 meaning the last column or
+// row as it does throughout.
+func (ts *TableStyle) Range(c0, r0, c1, r1 int) Sel { return Sel{ts, c0, r0, c1, r1} }
+
+// op appends a directive over the selection and returns the selection, so that
+// directives chain.
+func (s Sel) op(o tableOp) Sel {
+	o.c0, o.r0, o.c1, o.r1 = s.c0, s.r0, s.c1, s.r1
+	s.ts.ops = append(s.ts.ops, o)
+	return s
 }
 
-// Pad sets cell padding (left, right, top, bottom) over the cell range.
-func (ts *TableStyle) Pad(c0, r0, c1, r1 int, left, right, top, bottom float64) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opPad, c0: c0, r0: r0, c1: c1, r1: r1, pl: left, pr: right, pt: top, pb: bottom})
-	return ts
+// Align sets horizontal alignment over the selection.
+func (s Sel) Align(a Align) Sel { return s.op(tableOp{kind: opAlign, a: a}) }
+
+// Valign sets vertical alignment over the selection.
+func (s Sel) Valign(v VAlign) Sel { return s.op(tableOp{kind: opValign, v: v}) }
+
+// Pad sets the space around the content of every cell in the selection,
+// overriding [Table.Pad] for them.
+func (s Sel) Pad(p Padding) Sel {
+	return s.op(tableOp{kind: opPad, pl: p.Left, pr: p.Right, pt: p.Top, pb: p.Bottom})
 }
 
-// Background fills the cell range with col.
-func (ts *TableStyle) Background(c0, r0, c1, r1 int, col color.Color) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opBackground, c0: c0, r0: r0, c1: c1, r1: r1, col: col})
-	return ts
+// Background fills the selection with col.
+func (s Sel) Background(col color.Color) Sel {
+	return s.op(tableOp{kind: opBackground, col: col})
 }
 
-// LineBelow strokes a line under each row in the range.
-func (ts *TableStyle) LineBelow(c0, r0, c1, r1 int, w float64, col color.Color) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opLineBelow, c0: c0, r0: r0, c1: c1, r1: r1, f: w, col: col})
-	return ts
+// LineAbove strokes a line above each row of the selection.
+func (s Sel) LineAbove(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opLineAbove, f: w, col: col})
 }
 
-// LineAbove strokes a line above each row in the range.
-func (ts *TableStyle) LineAbove(c0, r0, c1, r1 int, w float64, col color.Color) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opLineAbove, c0: c0, r0: r0, c1: c1, r1: r1, f: w, col: col})
-	return ts
+// LineBelow strokes a line under each row of the selection.
+func (s Sel) LineBelow(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opLineBelow, f: w, col: col})
 }
 
-// Box strokes the outer border of the range.
-func (ts *TableStyle) Box(c0, r0, c1, r1 int, w float64, col color.Color) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opBox, c0: c0, r0: r0, c1: c1, r1: r1, f: w, col: col})
-	return ts
+// Box strokes the outer border of the selection.
+func (s Sel) Box(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opBox, f: w, col: col})
 }
 
-// Grid strokes both the box and every interior cell edge of the range.
-func (ts *TableStyle) Grid(c0, r0, c1, r1 int, w float64, col color.Color) *TableStyle {
-	ts.ops = append(ts.ops, tableOp{kind: opGrid, c0: c0, r0: r0, c1: c1, r1: r1, f: w, col: col})
-	return ts
+// Grid strokes both the box and every interior cell edge of the selection.
+func (s Sel) Grid(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opGrid, f: w, col: col})
 }
 
-// Table lays cells on a fixed column grid; row heights derive from content. A
-// table that outgrows its page continues on the next one, breaking between rows.
+// Table lays cells on a fixed column grid; row heights derive from content.
 type Table struct {
-	Rows      [][]Cell
-	ColWidths []float64 // points
+	Rows [][]Cell
+	// ColWidths are the column widths in points.
+	ColWidths []float64
 	Style     TableStyle
-	// CellStyle is the default text style for bare-string cells.
-	CellStyle Style
-	// cell is the paragraph a bare-string cell is drawn as, reused across every
-	// such cell so that a table of text allocates nothing.
-	cell Paragraph
+	// Pad is the space around every cell's content, which a [Sel.Pad] directivea
+	Pad Padding
+	// widths is ColWidths resolved against the frame of the draw in progress,
+	widths []float64
 }
 
-const defaultCellPad = 6
+// resolveWidths fills t.widths for a draw into f and returns it.
+func (t *Table) resolveWidths(f Frame) []float64 {
+	n := len(t.ColWidths)
+	if n == 0 {
+		// Undeclared, so there are as many columns as the widest row has cells.
+		for _, row := range t.Rows {
+			if len(row) > n {
+				n = len(row)
+			}
+		}
+		if n == 0 {
+			return nil
+		}
+		internal.SliceReuse(&t.widths, n)
+		t.widths = t.widths[:n]
+		for i := range t.widths {
+			t.widths[i] = f.Width / float64(n)
+		}
+		return t.widths
+	}
+	internal.SliceReuse(&t.widths, n)
+	t.widths = t.widths[:n]
+	fixed, free := 0.0, 0
+	for _, w := range t.ColWidths {
+		if w > 0 {
+			fixed += w
+		} else {
+			free++
+		}
+	}
+	share := 0.0
+	if free > 0 && f.Width > fixed {
+		share = (f.Width - fixed) / float64(free)
+	}
+	for i, w := range t.ColWidths {
+		if w > 0 {
+			t.widths[i] = w
+		} else {
+			t.widths[i] = share
+		}
+	}
+	return t.widths
+}
+
+// DefaultPad is the padding a Table used to apply on every side of every cell
+const DefaultPad = 6
+
+// PadAll is the same padding on all four sides.
+func PadAll(p float64) Padding { return Padding{Left: p, Right: p, Top: p, Bottom: p} }
 
 // Draw paints the table one row at a time, moving to the next page whenever the
 // row at hand no longer fits.
-//
-// A row's height is the tallest of its cells, and it must be known before any
-// of them is painted: the row's background goes down first, and a cell's
-// vertical alignment is measured against it. Since a content stream paints in
-// order and cannot be reordered after the fact, each cell is drawn onto the page
-// and retracted with [Measure] to learn its extent, then drawn again where the
-// finished row geometry puts it.
 func (t *Table) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
-	ncol := len(t.ColWidths)
-	if ncol == 0 {
+	if len(t.resolveWidths(f)) == 0 {
 		return 0, yTop, nil
 	}
 	y := yTop
@@ -157,11 +207,15 @@ func (t *Table) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd
 // rowHeight measures row r: the tallest cell in it, padding included.
 func (t *Table) rowHeight(dst []piupage.Canvas, f Frame, r int) (rowH float64, err error) {
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
 		}
+		dr := t.cellDrawer(ci, r)
+		if dr == nil {
+			continue
+		}
 		pl, pr, pt, pb := t.padding(ci, r)
-		h, err := Measure(dst, t.cellDrawer(ci, r), t.cellFrame(f, ci, pl, pr), f.Top)
+		h, err := Measure(dst, dr, t.cellFrame(f, ci, pl, pr), f.Top)
 		if err != nil {
 			return 0, err
 		}
@@ -180,24 +234,28 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 
 	x := f.X
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
 		}
 		if col, ok := t.background(ci, r); ok {
-			cv.FillRect(x, rowBot, t.ColWidths[ci], rowH, col)
+			cv.FillRect(x, rowBot, t.widths[ci], rowH, col)
 		}
-		x += t.ColWidths[ci]
+		x += t.widths[ci]
 	}
 
 	x = f.X
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
+		}
+		dr := t.cellDrawer(ci, r)
+		if dr == nil {
+			x += t.widths[ci]
+			continue
 		}
 		pl, pr, pt, pb := t.padding(ci, r)
 		cf := t.cellFrame(f, ci, pl, pr)
 		cf.X = x + pl
-		dr := t.cellDrawer(ci, r)
 		cellTop := top - pt
 		// Only a vertically aligned cell needs its own height; a top-aligned one
 		// starts at the row's top edge whatever its extent.
@@ -213,10 +271,10 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 				cellTop -= inner - h
 			}
 		}
-		if _, _, err := dr.Draw(dst[:1], cf, cellTop); err != nil {
+		if _, _, err := drawCell(dst[:1], dr, cf, cellTop, t.align(ci, r)); err != nil {
 			return err
 		}
-		x += t.ColWidths[ci]
+		x += t.widths[ci]
 	}
 
 	t.drawRules(cv, f, r, top, rowBot)
@@ -227,7 +285,7 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 // Working a row at a time is what lets a box or grid spanning a page break come
 // out closed on both pages.
 func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) {
-	ncol, nrow := len(t.ColWidths), len(t.Rows)
+	ncol, nrow := len(t.widths), len(t.Rows)
 	for _, op := range t.Style.ops {
 		switch op.kind {
 		case opLineBelow, opLineAbove, opBox, opGrid:
@@ -283,7 +341,7 @@ func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) 
 func (t *Table) cellFrame(f Frame, ci int, pl, pr float64) Frame {
 	return Frame{
 		X:      t.colLeft(f, ci) + pl,
-		Width:  t.ColWidths[ci] - pl - pr,
+		Width:  t.widths[ci] - pl - pr,
 		Top:    f.Top,
 		Bottom: noBreak,
 	}
@@ -294,35 +352,32 @@ func (t *Table) cellFrame(f Frame, ci int, pl, pr float64) Frame {
 // needs no scratch of its own.
 func (t *Table) colLeft(f Frame, ci int) float64 {
 	x := f.X
-	for i := 0; i < ci && i < len(t.ColWidths); i++ {
-		x += t.ColWidths[i]
+	for i := 0; i < ci && i < len(t.widths); i++ {
+		x += t.widths[i]
 	}
 	return x
 }
 
-// cellDrawer returns the drawer for cell (ci,r): its embedded Drawer, or the
-// table's reusable paragraph loaded with the cell's text.
-func (t *Table) cellDrawer(ci, r int) Drawer {
-	cell := t.Rows[r][ci]
-	if cell.Drawer != nil {
-		if p, ok := cell.Drawer.(*Paragraph); ok {
-			p.Style.Align = t.align(ci, r)
-		}
-		return cell.Drawer
+// cellDrawer returns the drawer for cell (ci,r), which the cell now simply
+// holds: a paragraph a [Builder] parsed, or a nested table.
+func (t *Table) cellDrawer(ci, r int) Drawer { return t.Rows[r][ci].Drawer }
+
+// drawCell draws d with the column's alignment, without writing that alignment
+// into d. The paragraph may be one the caller built and reuses, and a table has
+// no business restyling it — the old way of doing this is API-REVIEW 2d.
+func drawCell(dst []piupage.Canvas, d Drawer, f Frame, yTop float64, a Align) (int, float64, error) {
+	if d == nil {
+		return 0, yTop, nil
 	}
-	st := t.CellStyle
-	if st.Size == 0 {
-		st = Normal
+	if p, ok := d.(*Paragraph); ok {
+		return p.drawAligned(dst, f, yTop, a)
 	}
-	st.Align = t.align(ci, r)
-	t.cell.Text = cell.Text
-	t.cell.Style = st
-	return &t.cell
+	return d.Draw(dst, f, yTop)
 }
 
 // padding resolves the cell's padding, defaulting to defaultCellPad on each side.
 func (t *Table) padding(ci, r int) (pl, pr, pt, pb float64) {
-	pl, pr, pt, pb = defaultCellPad, defaultCellPad, defaultCellPad, defaultCellPad
+	pl, pr, pt, pb = t.Pad.Left, t.Pad.Right, t.Pad.Top, t.Pad.Bottom
 	for _, op := range t.Style.ops {
 		if op.kind == opPad && t.inRange(op, ci, r) {
 			pl, pr, pt, pb = op.pl, op.pr, op.pt, op.pb
@@ -364,8 +419,8 @@ func (t *Table) background(ci, r int) (color.Color, bool) {
 
 // inRange reports whether cell (ci,r) falls in op's resolved range.
 func (t *Table) inRange(op tableOp, ci, r int) bool {
-	c0 := resolveIdx(op.c0, len(t.ColWidths))
-	c1 := resolveIdx(op.c1, len(t.ColWidths))
+	c0 := resolveIdx(op.c0, len(t.widths))
+	c1 := resolveIdx(op.c1, len(t.widths))
 	r0 := resolveIdx(op.r0, len(t.Rows))
 	r1 := resolveIdx(op.r1, len(t.Rows))
 	if c0 > c1 {
