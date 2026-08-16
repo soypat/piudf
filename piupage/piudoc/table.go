@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"io"
 
+	"github.com/soypat/piudf/internal"
 	"github.com/soypat/piudf/piupage"
 )
 
@@ -96,12 +97,58 @@ func (ts *TableStyle) Grid(c0, r0, c1, r1 int, w float64, col color.Color) *Tabl
 	return ts
 }
 
-// Table lays cells on a fixed column grid; row heights derive from content. A
-// table that outgrows its page continues on the next one, breaking between rows.
+// Table lays cells on a fixed column grid; row heights derive from content.
 type Table struct {
-	Rows      [][]Cell
-	ColWidths []float64 // points
+	Rows [][]Cell
+	// ColWidths are the column widths in points.
+	ColWidths []float64
 	Style     TableStyle
+	// widths is ColWidths resolved against the frame of the draw in progress,
+	widths []float64
+}
+
+// resolveWidths fills t.widths for a draw into f and returns it.
+func (t *Table) resolveWidths(f Frame) []float64 {
+	n := len(t.ColWidths)
+	if n == 0 {
+		// Undeclared, so there are as many columns as the widest row has cells.
+		for _, row := range t.Rows {
+			if len(row) > n {
+				n = len(row)
+			}
+		}
+		if n == 0 {
+			return nil
+		}
+		internal.SliceReuse(&t.widths, n)
+		t.widths = t.widths[:n]
+		for i := range t.widths {
+			t.widths[i] = f.Width / float64(n)
+		}
+		return t.widths
+	}
+	internal.SliceReuse(&t.widths, n)
+	t.widths = t.widths[:n]
+	fixed, free := 0.0, 0
+	for _, w := range t.ColWidths {
+		if w > 0 {
+			fixed += w
+		} else {
+			free++
+		}
+	}
+	share := 0.0
+	if free > 0 && f.Width > fixed {
+		share = (f.Width - fixed) / float64(free)
+	}
+	for i, w := range t.ColWidths {
+		if w > 0 {
+			t.widths[i] = w
+		} else {
+			t.widths[i] = share
+		}
+	}
+	return t.widths
 }
 
 const defaultCellPad = 6
@@ -116,8 +163,7 @@ const defaultCellPad = 6
 // and retracted with [Measure] to learn its extent, then drawn again where the
 // finished row geometry puts it.
 func (t *Table) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
-	ncol := len(t.ColWidths)
-	if ncol == 0 {
+	if len(t.resolveWidths(f)) == 0 {
 		return 0, yTop, nil
 	}
 	y := yTop
@@ -147,7 +193,7 @@ func (t *Table) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd
 // rowHeight measures row r: the tallest cell in it, padding included.
 func (t *Table) rowHeight(dst []piupage.Canvas, f Frame, r int) (rowH float64, err error) {
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
 		}
 		dr := t.cellDrawer(ci, r)
@@ -174,23 +220,23 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 
 	x := f.X
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
 		}
 		if col, ok := t.background(ci, r); ok {
-			cv.FillRect(x, rowBot, t.ColWidths[ci], rowH, col)
+			cv.FillRect(x, rowBot, t.widths[ci], rowH, col)
 		}
-		x += t.ColWidths[ci]
+		x += t.widths[ci]
 	}
 
 	x = f.X
 	for ci := range t.Rows[r] {
-		if ci >= len(t.ColWidths) {
+		if ci >= len(t.widths) {
 			break
 		}
 		dr := t.cellDrawer(ci, r)
 		if dr == nil {
-			x += t.ColWidths[ci]
+			x += t.widths[ci]
 			continue
 		}
 		pl, pr, pt, pb := t.padding(ci, r)
@@ -214,7 +260,7 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 		if _, _, err := drawCell(dst[:1], dr, cf, cellTop, t.align(ci, r)); err != nil {
 			return err
 		}
-		x += t.ColWidths[ci]
+		x += t.widths[ci]
 	}
 
 	t.drawRules(cv, f, r, top, rowBot)
@@ -225,7 +271,7 @@ func (t *Table) drawRow(dst []piupage.Canvas, f Frame, r int, top, rowH float64)
 // Working a row at a time is what lets a box or grid spanning a page break come
 // out closed on both pages.
 func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) {
-	ncol, nrow := len(t.ColWidths), len(t.Rows)
+	ncol, nrow := len(t.widths), len(t.Rows)
 	for _, op := range t.Style.ops {
 		switch op.kind {
 		case opLineBelow, opLineAbove, opBox, opGrid:
@@ -281,7 +327,7 @@ func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) 
 func (t *Table) cellFrame(f Frame, ci int, pl, pr float64) Frame {
 	return Frame{
 		X:      t.colLeft(f, ci) + pl,
-		Width:  t.ColWidths[ci] - pl - pr,
+		Width:  t.widths[ci] - pl - pr,
 		Top:    f.Top,
 		Bottom: noBreak,
 	}
@@ -292,8 +338,8 @@ func (t *Table) cellFrame(f Frame, ci int, pl, pr float64) Frame {
 // needs no scratch of its own.
 func (t *Table) colLeft(f Frame, ci int) float64 {
 	x := f.X
-	for i := 0; i < ci && i < len(t.ColWidths); i++ {
-		x += t.ColWidths[i]
+	for i := 0; i < ci && i < len(t.widths); i++ {
+		x += t.widths[i]
 	}
 	return x
 }
@@ -359,8 +405,8 @@ func (t *Table) background(ci, r int) (color.Color, bool) {
 
 // inRange reports whether cell (ci,r) falls in op's resolved range.
 func (t *Table) inRange(op tableOp, ci, r int) bool {
-	c0 := resolveIdx(op.c0, len(t.ColWidths))
-	c1 := resolveIdx(op.c1, len(t.ColWidths))
+	c0 := resolveIdx(op.c0, len(t.widths))
+	c1 := resolveIdx(op.c1, len(t.widths))
 	r0 := resolveIdx(op.r0, len(t.Rows))
 	r1 := resolveIdx(op.r1, len(t.Rows))
 	if c0 > c1 {

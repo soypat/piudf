@@ -21,10 +21,12 @@ const (
 	Bottom
 )
 
-// LinkStyle is how an <a href> span is drawn. A PDF link annotation paints
-// nothing of its own, so without a LinkStyle a link is invisible but clickable.
-// The zero value inherits the enclosing span's color and draws no rule, which
-// leaves the annotation purely behavioural.
+// Padding is the space around a cell's content, on each of its four sides.
+type Padding struct {
+	Left, Right, Top, Bottom float64
+}
+
+// LinkStyle defines how an <a href> span is drawn.
 type LinkStyle struct {
 	// Color overrides the span's text color; nil inherits it.
 	Color color.Color
