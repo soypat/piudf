@@ -375,14 +375,26 @@ func (b FontBuiltin) GlyphAdvance(glyph uint16) int32 {
 	return int32(adv)
 }
 
-// widths is b's AFM advance table. Only the two Helvetica weights carry real
-// metrics in this first cut; the rest stand in with Helvetica's.
+// widths is b's AFM advance table. The Helvetica and Courier weights carry real
+// metrics; the rest stand in with Helvetica's.
 func (b FontBuiltin) widths() *[256]int16 {
 	switch b {
 	case FontHelveticaBold, FontHelveticaBoldOblique:
 		return &helveticaBoldWidths
+	case FontCourier, FontCourierBold, FontCourierOblique, FontCourierBoldOblique:
+		return &courierWidths
 	}
 	return &helveticaWidths
+}
+
+// courierWidths is uniform: Courier is fixed-pitch at every weight and slant,
+// so it is filled rather than spelled out like the proportional tables below.
+var courierWidths [256]int16
+
+func init() {
+	for i := range courierWidths {
+		courierWidths[i] = 600
+	}
 }
 
 // Adobe AFM advance-width tables for the Helvetica family, indexed by WinAnsi
