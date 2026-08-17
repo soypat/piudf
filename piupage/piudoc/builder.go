@@ -202,7 +202,8 @@ func (bld *Builder) pack(src []atom) (text []byte, out []piece) {
 			text = append(text, a.word...)
 			word = text[start:]
 		}
-		out[i] = piece{text: word, font: a.font, size: a.size, col: a.col, href: packedHref, brk: a.brk}
+		out[i] = piece{text: word, font: a.font, size: a.size, col: a.col,
+			href: packedHref, brk: a.brk, glue: a.glue}
 	}
 	return text, out
 }
@@ -305,6 +306,8 @@ const (
 	// ErrEmptyBookmark is a bookmark with no title, which would land in the
 	// reader's navigation pane as an unclickable blank.
 	ErrEmptyBookmark
+	// ErrBadFamily is a [Builder.SetFamily] with no name or no Regular face.
+	ErrBadFamily
 )
 
 // String returns the kind's message, without the offset or the offending text
@@ -329,6 +332,8 @@ func (k ErrKind) String() string {
 		return "bad color"
 	case ErrEmptyBookmark:
 		return "bookmark with no title"
+	case ErrBadFamily:
+		return "family with no name or no Regular face"
 	}
 	return "unknown error"
 }

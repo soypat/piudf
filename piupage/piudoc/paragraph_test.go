@@ -50,7 +50,7 @@ func TestParseAtomsStyle(t *testing.T) {
 		t.Fatalf("got %d atoms, want 4", len(atoms))
 	}
 	for i, want := range []string{"Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica"} {
-		if got := atoms[i].font.BaseName(); got != want {
+		if got := atoms[i].font.PostScriptName(); got != want {
 			t.Errorf("atom %d font = %s, want %s", i, got, want)
 		}
 	}

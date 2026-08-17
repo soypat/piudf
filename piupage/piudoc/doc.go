@@ -11,6 +11,7 @@ package piudoc
 import (
 	"io"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/soypat/piudf"
@@ -85,6 +86,10 @@ type Doc struct {
 	Lang    string
 	OnPage  func(c *piupage.Canvas, p PageInfo)
 
+	// CheckGlyphs fails [Doc.Build] on a glyph the font cannot draw or a font
+	// too damaged to describe itself. NOT IMPLEMENTED: setting it does nothing.
+	CheckGlyphs bool
+
 	w   io.Writer
 	enc piudf.Encoder
 	// global objects.
@@ -96,7 +101,10 @@ type Doc struct {
 	marks             []mark
 	fonts             []piupage.Font
 	fontids           []piudf.ObjectID
-	pageIDs           []piudf.ObjectID
+	// glyphs is every glyph the pages drew, sorted by font then glyph and
+	// deduplicated, naming its font by index into fonts.
+	glyphs  []piupage.GlyphUse
+	pageIDs []piudf.ObjectID
 	// annots is scratch: the link annotations of the page being written.
 	annots []piudf.ObjectID
 }
@@ -130,6 +138,7 @@ func (d *Doc) Reset(w io.Writer, encBuf []byte) (err error) {
 	d.pages = piudf.ObjectID{}
 	d.pageIDs = d.pageIDs[:0]
 	d.fonts = d.fonts[:0]
+	d.glyphs = d.glyphs[:0]
 	d.fontids = d.fontids[:0]
 	d.marks = d.marks[:0]
 	d.annots = d.annots[:0]
@@ -207,21 +216,41 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		}
 	}
 
-	// Write all fonts and store in document for later.
+	// Register every face and gather what each was asked to draw. A subset is
+	// cut once for the document, not once per page, so the glyphs have to be
+	// merged before any font is written.
+	fontFirst := len(d.fonts)
 	for i := range nCanv {
 		cv := &dst[i]
-		for _, ft := range cv.Fonts() {
-			idx := d.fontidx(ft.BaseName())
-			if idx >= 0 {
-				continue
+		fonts := cv.Fonts()
+		for _, ft := range fonts {
+			if d.fontidx(ft.PostScriptName()) < 0 {
+				d.fonts = append(d.fonts, ft)
 			}
-			d.fonts = append(d.fonts, ft)
-			id, err := piupage.WriteFont(&d.enc, ft)
-			if err != nil {
-				return nCanv, nStories, err
-			}
-			d.fontids = append(d.fontids, id)
 		}
+		for _, gu := range cv.Glyphs() {
+			gu.Font = uint16(d.fontidx(fonts[gu.Font].PostScriptName()))
+			d.glyphs = append(d.glyphs, gu)
+		}
+	}
+	// Sorting by font and glyph puts each face's glyphs in one ascending run,
+	// which is the order the subsetter, the /W array and the /ToUnicode map all
+	// want, and it is what makes the duplicates adjacent.
+	slices.SortFunc(d.glyphs, func(a, b piupage.GlyphUse) int {
+		if a.Font != b.Font {
+			return int(a.Font) - int(b.Font)
+		}
+		return int(a.Glyph) - int(b.Glyph)
+	})
+	d.glyphs = slices.CompactFunc(d.glyphs, func(a, b piupage.GlyphUse) bool {
+		return a.Font == b.Font && a.Glyph == b.Glyph
+	})
+	for i := fontFirst; i < len(d.fonts); i++ {
+		id, err := piupage.WriteFont(&d.enc, d.fonts[i], d.fontGlyphs(i))
+		if err != nil {
+			return nCanv, nStories, err
+		}
+		d.fontids = append(d.fontids, id)
 	}
 
 	d.pageIDs = append(d.pageIDs, make([]piudf.ObjectID, nCanv)...)
@@ -287,7 +316,7 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		d.enc.Name("Font")
 		d.enc.DictOpen()
 		for i, ft := range cv.Fonts() {
-			idx := d.fontidx(ft.BaseName())
+			idx := d.fontidx(ft.PostScriptName())
 			id := d.fontids[idx]
 			d.enc.NameNum("F", int64(i+1))
 			d.enc.Ref(id.Num, id.Gen)
@@ -355,12 +384,22 @@ func (d *Doc) close() error {
 
 func (d *Doc) fontidx(basename string) int {
 	for i, f := range d.fonts {
-		if basename == f.BaseName() {
+		if basename == f.PostScriptName() {
 			return i
 		}
 	}
 	return -1
 }
+
+// fontGlyphs is the run of d.glyphs belonging to the font at index i, which the
+// sort left contiguous and ascending.
+func (d *Doc) fontGlyphs(i int) []piupage.GlyphUse {
+	lo, _ := slices.BinarySearchFunc(d.glyphs, uint16(i), cmpGlyphFont)
+	hi, _ := slices.BinarySearchFunc(d.glyphs, uint16(i+1), cmpGlyphFont)
+	return d.glyphs[lo:hi]
+}
+
+func cmpGlyphFont(g piupage.GlyphUse, font uint16) int { return int(g.Font) - int(font) }
 
 // mark is a bookmark that has been placed: the frame records where the story
 // was when it went past, since a Bookmark draws nothing and cannot know.

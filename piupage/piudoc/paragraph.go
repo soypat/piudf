@@ -41,6 +41,9 @@ type piece struct {
 	href []byte
 	// brk marks an explicit <br/>: it carries no text and ends the line.
 	brk bool
+	// glue marks a piece the source ran straight onto the one before it, which
+	// is drawn with no space between them. See [atom].
+	glue bool
 }
 
 // Draw breaks the text greedily to the frame's width and paints it from yTop
@@ -64,7 +67,7 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 	for i := range p.line {
 		pc := &p.line[i]
 		if pc.brk {
-			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, a)
+			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, lastLine(a))
 			if err != nil {
 				return adv, y, err
 			}
@@ -73,7 +76,7 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 		}
 		wordW := piupage.StringWidth(pc.font, b2s(pc.text), pc.size)
 		space := 0.0
-		if i > start {
+		if i > start && !pc.glue {
 			space = piupage.StringWidth(pc.font, " ", pc.size)
 		}
 		if i > start && lineW+space+wordW > avail {
@@ -88,11 +91,21 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 			maxSize = pc.size
 		}
 	}
-	adv, y, err = p.emitLine(dst, f, p.line[start:], adv, y, avail, lineW, maxSize, a)
+	adv, y, err = p.emitLine(dst, f, p.line[start:], adv, y, avail, lineW, maxSize, lastLine(a))
 	if err != nil {
 		return adv, y, err
 	}
 	return adv, y - p.Style.SpaceAfter, nil
+}
+
+// lastLine is a for the line that ends a paragraph or precedes a break, where
+// justification sets flush left: stretching a short final line is the way that
+// setting is done badly.
+func lastLine(a Align) Align {
+	if a == Justify {
+		return Left
+	}
+	return a
 }
 
 // emitLine paints one line's pieces at the cursor, moving to the next page
@@ -113,11 +126,27 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 	cv := &dst[adv]
 	x0 := f.X + p.Style.LeftIndent
 	startX := x0
+	// extra is the slack a justified line spreads across its gaps, so that its
+	// last word ends exactly on the measure.
+	extra := 0.0
 	switch a {
 	case Right:
 		startX = x0 + avail - lineW
 	case Center:
 		startX = x0 + (avail-lineW)/2
+	case Justify:
+		// Only real gaps take slack: a glued piece has none to widen.
+		gaps := 0
+		for i := 1; i < len(line); i++ {
+			if !line[i].glue {
+				gaps++
+			}
+		}
+		// A line of one word has nowhere to put the slack, and one that already
+		// overruns has none to give.
+		if gaps > 0 && avail > lineW {
+			extra = (avail - lineW) / float64(gaps)
+		}
 	}
 	h := maxf(maxSize, p.Style.Size)
 	base := y - 0.8*h
@@ -131,7 +160,7 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 	runX := startX
 	for i := range line {
 		pc := &line[i]
-		if i > 0 {
+		if i > 0 && !pc.glue {
 			// The gap between two words is not stored, only stepped over: a PDF
 			// text run needs no space glyph. It belongs to a link when it sits
 			// between two words of the same one, and to neither otherwise —
@@ -145,7 +174,7 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 				p.closeRun(cv, runHref, runX, px, base, h)
 				runHref, runX = spHref, px
 			}
-			px += piupage.StringWidth(pc.font, " ", pc.size)
+			px += piupage.StringWidth(pc.font, " ", pc.size) + extra
 		}
 		if !bytes.Equal(pc.href, runHref) {
 			p.closeRun(cv, runHref, runX, px, base, h)
@@ -192,6 +221,9 @@ func maxf(a, b float64) float64 {
 type atom struct {
 	word []byte
 	brk  bool
+	// glue marks a word no whitespace separated from the one before it, as the
+	// comma in "<a href=…>lneto</a>," is. Without it a gap would be invented.
+	glue bool
 	font piupage.Font
 	size float64
 	col  color.Color
@@ -220,6 +252,12 @@ type atomParser struct {
 	// esc holds the runs and link targets whose entities had to be resolved,
 	// which are the only bytes a parse writes.
 	esc []byte
+	// families are the faces registered through [Builder.SetFamily], scanned
+	// once per run rather than once per word.
+	families []namedFamily
+	// gap records that whitespace has been passed since the last word, so that
+	// a word following a tag knows whether anything separated the two.
+	gap bool
 }
 
 // resolve returns v with its entities resolved: v itself when it carries none,
@@ -251,6 +289,7 @@ func baseSpan(base Style) spanStyle {
 func (ap *atomParser) parseText(text []byte, base Style) []atom {
 	ap.atoms = ap.atoms[:0]
 	ap.esc = ap.esc[:0]
+	ap.gap = false
 	ap.appendWordsRaw(text, baseSpan(base), baseFamily(base.family()))
 	return ap.atoms
 }
@@ -260,6 +299,7 @@ func (ap *atomParser) parseText(text []byte, base Style) []atom {
 func (ap *atomParser) parse(text []byte, base Style) []atom {
 	ap.atoms = ap.atoms[:0]
 	ap.esc = ap.esc[:0]
+	ap.gap = false
 	if bytes.IndexByte(text, '&') >= 0 {
 		// Sized once, before a single word can point into it. See atomParser.esc.
 		internal.SliceReuse(&ap.esc, len(text))
@@ -291,6 +331,7 @@ func (ap *atomParser) parse(text []byte, base Style) []atom {
 		switch {
 		case tag == "br" || tag == "br/" || tag == "br /":
 			ap.atoms = append(ap.atoms, atom{brk: true})
+			ap.gap = true // A line break separates as surely as a space.
 		case tag == "b":
 			cur := stack[len(stack)-1]
 			cur.bold = true
@@ -342,17 +383,23 @@ func (ap *atomParser) appendWords(s []byte, cur spanStyle, family string) {
 // appendWordsRaw splits s where it lies, resolving nothing. Every word is a view
 // into s, so a run costs one atom per word and not a byte more.
 func (ap *atomParser) appendWordsRaw(s []byte, cur spanStyle, family string) {
-	f := resolveFont(family, cur.bold, cur.ital)
+	f := ap.resolveFont(family, cur.bold, cur.ital)
 	for i := 0; i < len(s); {
 		for i < len(s) && isSpace(s[i]) {
 			i++
+			ap.gap = true
 		}
 		j := i
 		for j < len(s) && !isSpace(s[j]) {
 			j++
 		}
 		if j > i {
-			ap.atoms = append(ap.atoms, atom{word: s[i:j], font: f, size: cur.size, col: cur.col, href: cur.href})
+			// The gap is carried across runs, so a tag between two words is not
+			// itself a separator: only whitespace is.
+			glue := !ap.gap && len(ap.atoms) > 0
+			ap.atoms = append(ap.atoms, atom{word: s[i:j], glue: glue,
+				font: f, size: cur.size, col: cur.col, href: cur.href})
+			ap.gap = false
 		}
 		i = j
 	}
@@ -404,15 +451,6 @@ func baseFamily(name string) string {
 		return name[:i]
 	}
 	return name
-}
-
-// resolveFont maps a family plus bold/italic flags to a standard-14 font.
-func resolveFont(family string, bold, ital bool) piupage.Font {
-	if f, ok := piupage.Standard14(styleName(family, bold, ital)); ok {
-		return f
-	}
-	f, _ := piupage.Standard14("Helvetica")
-	return f
 }
 
 // styleName is the /BaseFont name for a family at a weight and slant. The names
