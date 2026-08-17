@@ -180,6 +180,45 @@ func (e *Emitter) StringBytes(s []byte) {
 	e.String(unsafe.String(unsafe.SliceData(s), len(s)))
 }
 
+// TextString emits s as a PDF text string: a literal string while every byte is
+// ASCII, and UTF-16BE hex behind a U+FEFF byte order mark otherwise when argument is utf8 non-ascii encoded.
+func (e *Emitter) TextString(s string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			e.utf16String(s)
+			return
+		}
+	}
+	e.String(s)
+}
+
+// utf16String emits s as UTF-16BE hex behind the byte order mark, a code unit at
+// a time so that no buffer is needed to hold the transcoding.
+func (e *Emitter) utf16String(s string) {
+	e.wbyte('<')
+	e.whex16(0xfeff)
+	for _, r := range s {
+		if r < 0x10000 {
+			e.whex16(uint16(r))
+			continue
+		}
+		r -= 0x10000
+		e.whex16(uint16(0xd800 + r>>10))
+		e.whex16(uint16(0xdc00 + r&0x3ff))
+	}
+	e.wbyte('>')
+	e.needSep = false
+}
+
+// whex16 emits one UTF-16 code unit as four hex digits, high byte first.
+func (e *Emitter) whex16(v uint16) {
+	const hexdig = "0123456789abcdef"
+	e.wbyte(hexdig[v>>12])
+	e.wbyte(hexdig[v>>8&0xf])
+	e.wbyte(hexdig[v>>4&0xf])
+	e.wbyte(hexdig[v&0xf])
+}
+
 // HexString emits <hex digits of s>.
 func (e *Emitter) HexString(s []byte) {
 	const hexdig = "0123456789abcdef"

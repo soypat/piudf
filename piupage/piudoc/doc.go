@@ -354,20 +354,37 @@ func (d *Doc) close() error {
 
 	// Info dictionary (optional).
 	var info piudf.ObjectID
-	if d.Title != "" || d.Author != "" {
+	if d.Title != "" || d.Author != "" || d.Subject != "" || d.Creator != "" || !d.Date.IsZero() {
 		info = d.enc.NewID()
 		d.enc.BeginObject(info)
 		d.enc.DictOpen()
-		if d.Title != "" {
-			d.enc.Name("Title")
-			d.enc.String(d.Title)
+		for _, e := range [...]struct{ key, val string }{
+			{"Title", d.Title}, {"Author", d.Author},
+			{"Subject", d.Subject}, {"Creator", d.Creator},
+		} {
+			if e.val != "" {
+				d.enc.Name(e.key)
+				d.enc.TextString(e.val)
+			}
 		}
-		if d.Author != "" {
-			d.enc.Name("Author")
-			d.enc.String(d.Author)
+		if !d.Date.IsZero() {
+			// A PDF date is ASCII by construction, so it is a literal string and
+			// not a text string. Both keys carry it: a document written in one
+			// pass was never modified after it was created.
+			d.scratch = appendPDFDate(d.scratch[:0], d.Date)
+			d.enc.Name("CreationDate")
+			d.enc.StringBytes(d.scratch)
+			d.enc.Name("ModDate")
+			d.enc.StringBytes(d.scratch)
 		}
 		d.enc.DictClose()
 		d.enc.EndObject()
+	}
+
+	// Outline tree, which the catalog points at.
+	var outlines piudf.ObjectID
+	if len(d.marks) > 0 {
+		outlines = d.writeOutlines()
 	}
 
 	// Catalog.
@@ -377,6 +394,16 @@ func (d *Doc) close() error {
 	d.enc.Name("Catalog")
 	d.enc.Name("Pages")
 	d.enc.Ref(d.pages.Num, d.pages.Gen)
+	if outlines.Num != 0 {
+		d.enc.Name("Outlines")
+		d.enc.Ref(outlines.Num, outlines.Gen)
+	}
+	if d.Lang != "" {
+		// A language tag is ASCII, so TextString spends nothing on it and stays
+		// right if one ever is not.
+		d.enc.Name("Lang")
+		d.enc.TextString(d.Lang)
+	}
 	d.enc.DictClose()
 	d.enc.EndObject()
 	return d.enc.Close(d.catalog, info)
@@ -408,6 +435,169 @@ type mark struct {
 	level int
 	page  int
 	y     float64
+	// id is the outline item this is written as, filled by writeOutlines before
+	// any item is written because an item names siblings and children that
+	// follow it.
+	id piudf.ObjectID
+}
+
+// The outline tree is the run of placed marks read through their levels: a
+// mark's descendants are exactly the marks after it at a deeper level, which is
+// contiguous, so every link an item needs is a scan and none has to be stored.
+
+// markParent is the nearest earlier mark at a shallower level; -1 means the item
+// hangs off the outline root.
+func (d *Doc) markParent(i int) int {
+	for j := i - 1; j >= 0; j-- {
+		if d.marks[j].level < d.marks[i].level {
+			return j
+		}
+	}
+	return -1
+}
+
+// markSibling is the adjacent sibling of i in direction step (-1 or 1). The
+// first mark at or above i's level ends the search: at the same level it is the
+// sibling, above it is the parent, and i is an outer child.
+func (d *Doc) markSibling(i, step int) int {
+	for j := i + step; j >= 0 && j < len(d.marks); j += step {
+		if d.marks[j].level > d.marks[i].level {
+			continue
+		}
+		if d.marks[j].level == d.marks[i].level {
+			return j
+		}
+		break
+	}
+	return -1
+}
+
+// markChildren is i's first and last child, or -1, -1. The first child can only
+// be the very next mark; the last is the end of its sibling chain.
+func (d *Doc) markChildren(i int) (first, last int) {
+	if i+1 >= len(d.marks) || d.marks[i+1].level <= d.marks[i].level {
+		return -1, -1
+	}
+	last = i + 1
+	for next := d.markSibling(last, 1); next >= 0; next = d.markSibling(last, 1) {
+		last = next
+	}
+	return i + 1, last
+}
+
+// markCount is how many descendants i has at every depth, which is the /Count a
+// reader wants because every item is written open.
+func (d *Doc) markCount(i int) (n int) {
+	for j := i + 1; j < len(d.marks) && d.marks[j].level > d.marks[i].level; j++ {
+		n++
+	}
+	return n
+}
+
+// writeOutlines emits the outline tree and returns its root. Every id is
+// allocated before any item is written, because an item names siblings and
+// children that come after it.
+func (d *Doc) writeOutlines() piudf.ObjectID {
+	root := d.enc.NewID()
+	for i := range d.marks {
+		d.marks[i].id = d.enc.NewID()
+	}
+	// ref emits item i, or the root, which is what a top-level item's parent is.
+	ref := func(i int) {
+		id := root
+		if i >= 0 {
+			id = d.marks[i].id
+		}
+		d.enc.Ref(id.Num, id.Gen)
+	}
+
+	for i := range d.marks {
+		m := &d.marks[i]
+		first, last := d.markChildren(i)
+		d.enc.BeginObject(m.id)
+		d.enc.DictOpen()
+		d.enc.Name("Title")
+		d.enc.TextString(m.title)
+		d.enc.Name("Parent")
+		ref(d.markParent(i))
+		for _, e := range [...]struct {
+			key string
+			to  int
+		}{
+			{"Prev", d.markSibling(i, -1)}, {"Next", d.markSibling(i, 1)},
+			{"First", first}, {"Last", last},
+		} {
+			if e.to >= 0 {
+				d.enc.Name(e.key)
+				ref(e.to)
+			}
+		}
+		if n := d.markCount(i); n > 0 {
+			d.enc.Name("Count")
+			d.enc.Int(int64(n))
+		}
+		if m.page >= 0 && m.page < len(d.pageIDs) {
+			// /XYZ with a null left and zoom scrolls the page to the mark
+			// without disturbing the reader's horizontal position or zoom.
+			pid := d.pageIDs[m.page]
+			d.enc.Name("Dest")
+			d.enc.ArrayOpen()
+			d.enc.Ref(pid.Num, pid.Gen)
+			d.enc.Name("XYZ")
+			d.enc.Null()
+			d.enc.Real(m.y)
+			d.enc.Null()
+			d.enc.ArrayClose()
+		}
+		d.enc.DictClose()
+		d.enc.EndObject()
+	}
+
+	last := -1
+	for i := range d.marks {
+		if d.markParent(i) < 0 {
+			last = i
+		}
+	}
+	d.enc.BeginObject(root)
+	d.enc.DictOpen()
+	d.enc.Name("Type")
+	d.enc.Name("Outlines")
+	if last >= 0 {
+		// The first mark is always top-level: nothing precedes it to be its parent.
+		d.enc.Name("First")
+		ref(0)
+		d.enc.Name("Last")
+		ref(last)
+	}
+	// Every item is open, so the root's visible count is all of them.
+	d.enc.Name("Count")
+	d.enc.Int(int64(len(d.marks)))
+	d.enc.DictClose()
+	d.enc.EndObject()
+	return root
+}
+
+// appendPDFDate appends t as (D:YYYYMMDDHHmmSSOHH'mm'), the only date form the
+// spec gives. The zone is spelled out here because Go has no layout for the
+// apostrophes.
+func appendPDFDate(dst []byte, t time.Time) []byte {
+	dst = t.AppendFormat(dst, "D:20060102150405")
+	_, off := t.Zone()
+	sign := byte('+')
+	if off < 0 {
+		sign, off = '-', -off
+	}
+	off /= 60
+	dst = append(dst, sign)
+	dst = appendPad2(dst, off/60)
+	dst = append(dst, '\'')
+	dst = appendPad2(dst, off%60)
+	return append(dst, '\'')
+}
+
+func appendPad2(dst []byte, v int) []byte {
+	return append(dst, byte('0'+v/10%10), byte('0'+v%10))
 }
 
 // Bookmark names a place in the document for the reader's navigation pane. Does not draw anything.

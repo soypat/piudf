@@ -2,7 +2,9 @@ package piudoc
 
 import (
 	"bytes"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/soypat/piudf/piupage"
 )
@@ -113,5 +115,105 @@ func TestParagraphLinkAnnotations(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("(https://go.dev/doc)")) {
 		t.Errorf("the href did not reach the annotation:\n%s", out)
+	}
+}
+
+// TestInfoIsATextString: /Title and /Author are PDF text strings, which a reader
+// decodes as PDFDocEncoding unless the bytes open with a UTF-16BE byte order
+// mark. Writing UTF-8 into a literal string turns an em dash into three
+// characters in every reader's title bar.
+func TestInfoIsATextString(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+		want  string
+	}{
+		// ASCII costs nothing to leave as it is, and every document already
+		// written this way keeps its bytes.
+		{"ascii", "Plain Title", "/Title(Plain Title)"},
+		{"em dash", "a — b", "/Title<feff00610020201400200062>"},
+		{"astral", "x \U0001F600", "/Title<feff00780020d83dde00>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}, Title: tc.title}
+			out := build(t, d, []Drawer{Spacer{H: 10}}, 1)
+			if !bytes.Contains(out, []byte(tc.want)) {
+				got, _, _ := bytes.Cut(out[bytes.Index(out, []byte("/Title")):], []byte("/Author"))
+				t.Errorf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInfoWritesEveryField(t *testing.T) {
+	d := &Doc{
+		Size: SizeA4(), Margins: Margins{72, 72, 72, 72},
+		Title: "T", Author: "A", Subject: "S", Creator: "C", Lang: "en",
+		Date: time.Date(2026, 8, 16, 22, 30, 0, 0, time.FixedZone("", -3*3600)),
+	}
+	out := build(t, d, []Drawer{Spacer{H: 10}}, 1)
+	for _, want := range []string{
+		"/Title(T)", "/Author(A)", "/Subject(S)", "/Creator(C)",
+		// A date is ASCII by construction, so it stays a literal string.
+		"/CreationDate(D:20260816223000-03'00')", "/ModDate(D:20260816223000-03'00')",
+		"/Lang(en)",
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Errorf("missing %s", want)
+		}
+	}
+}
+
+// TestOutlineTree: bookmarks at three levels must come out as a tree a reader
+// can walk — every item naming its parent, its siblings and its children.
+func TestOutlineTree(t *testing.T) {
+	d := &Doc{Size: SizeA4(), Margins: Margins{72, 72, 72, 72}}
+	// one
+	//   one.a
+	//   one.b
+	//     one.b.i
+	// two
+	out := build(t, d, []Drawer{
+		Bookmark{Title: "one", Level: 1},
+		Bookmark{Title: "one.a", Level: 2},
+		Bookmark{Title: "one.b", Level: 2},
+		Bookmark{Title: "one.b.i", Level: 3},
+		Bookmark{Title: "two", Level: 1},
+		Spacer{H: 10},
+	}, 1)
+
+	// writeOutlines allocates the root and then one id per mark in order, so the
+	// catalog's /Outlines is all the test needs to name every item.
+	root := 0
+	if _, rest, ok := bytes.Cut(out, []byte("/Outlines ")); !ok {
+		t.Fatalf("the catalog does not point at an outline:\n%s", out)
+	} else {
+		num, _, _ := bytes.Cut(rest, []byte(" 0 R"))
+		root, _ = strconv.Atoi(string(num))
+	}
+	item := func(i int) string { return strconv.Itoa(root+1+i) + " 0 R" }
+	for _, tc := range []struct{ title, want string }{
+		{"one", "/Parent " + strconv.Itoa(root) + " 0 R/Next " + item(4) + "/First " + item(1) + "/Last " + item(2) + "/Count 3"},
+		{"one.a", "/Parent " + item(0) + "/Next " + item(2)},
+		{"one.b", "/Parent " + item(0) + "/Prev " + item(1) + "/First " + item(3) + "/Last " + item(3) + "/Count 1"},
+		{"one.b.i", "/Parent " + item(2)},
+		{"two", "/Parent " + strconv.Itoa(root) + " 0 R/Prev " + item(0)},
+	} {
+		i := bytes.Index(out, []byte("/Title("+tc.title+")"))
+		if i < 0 {
+			t.Fatalf("no outline item titled %q:\n%s", tc.title, out)
+		}
+		got, _, _ := bytes.Cut(out[i:], []byte("/Dest"))
+		if !bytes.Contains(got, []byte(tc.want)) {
+			t.Errorf("%s: got %s\nwant %s", tc.title, got, tc.want)
+		}
+	}
+	// The root names the two top-level items and counts every visible one.
+	if !bytes.Contains(out, []byte("/Type/Outlines/First "+item(0)+"/Last "+item(4)+"/Count 5")) {
+		t.Errorf("outline root is not a tree over both top-level items:\n%s", out)
+	}
+	// Every item is reachable from a page, or it navigates nowhere.
+	if got := bytes.Count(out, []byte("/Dest[")); got != 5 {
+		t.Errorf("%d destinations for 5 bookmarks", got)
 	}
 }
