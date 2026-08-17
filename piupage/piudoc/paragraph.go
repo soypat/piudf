@@ -41,6 +41,9 @@ type piece struct {
 	href []byte
 	// brk marks an explicit <br/>: it carries no text and ends the line.
 	brk bool
+	// glue marks a piece the source ran straight onto the one before it, which
+	// is drawn with no space between them. See [atom].
+	glue bool
 }
 
 // Draw breaks the text greedily to the frame's width and paints it from yTop
@@ -73,7 +76,7 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 		}
 		wordW := piupage.StringWidth(pc.font, b2s(pc.text), pc.size)
 		space := 0.0
-		if i > start {
+		if i > start && !pc.glue {
 			space = piupage.StringWidth(pc.font, " ", pc.size)
 		}
 		if i > start && lineW+space+wordW > avail {
@@ -132,9 +135,16 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 	case Center:
 		startX = x0 + (avail-lineW)/2
 	case Justify:
+		// Only real gaps take slack: a glued piece has none to widen.
+		gaps := 0
+		for i := 1; i < len(line); i++ {
+			if !line[i].glue {
+				gaps++
+			}
+		}
 		// A line of one word has nowhere to put the slack, and one that already
 		// overruns has none to give.
-		if gaps := len(line) - 1; gaps > 0 && avail > lineW {
+		if gaps > 0 && avail > lineW {
 			extra = (avail - lineW) / float64(gaps)
 		}
 	}
@@ -150,7 +160,7 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 	runX := startX
 	for i := range line {
 		pc := &line[i]
-		if i > 0 {
+		if i > 0 && !pc.glue {
 			// The gap between two words is not stored, only stepped over: a PDF
 			// text run needs no space glyph. It belongs to a link when it sits
 			// between two words of the same one, and to neither otherwise —
@@ -211,6 +221,9 @@ func maxf(a, b float64) float64 {
 type atom struct {
 	word []byte
 	brk  bool
+	// glue marks a word no whitespace separated from the one before it, as the
+	// comma in "<a href=…>lneto</a>," is. Without it a gap would be invented.
+	glue bool
 	font piupage.Font
 	size float64
 	col  color.Color
@@ -242,6 +255,9 @@ type atomParser struct {
 	// families are the faces registered through [Builder.SetFamily], scanned
 	// once per run rather than once per word.
 	families []namedFamily
+	// gap records that whitespace has been passed since the last word, so that
+	// a word following a tag knows whether anything separated the two.
+	gap bool
 }
 
 // resolve returns v with its entities resolved: v itself when it carries none,
@@ -273,6 +289,7 @@ func baseSpan(base Style) spanStyle {
 func (ap *atomParser) parseText(text []byte, base Style) []atom {
 	ap.atoms = ap.atoms[:0]
 	ap.esc = ap.esc[:0]
+	ap.gap = false
 	ap.appendWordsRaw(text, baseSpan(base), baseFamily(base.family()))
 	return ap.atoms
 }
@@ -282,6 +299,7 @@ func (ap *atomParser) parseText(text []byte, base Style) []atom {
 func (ap *atomParser) parse(text []byte, base Style) []atom {
 	ap.atoms = ap.atoms[:0]
 	ap.esc = ap.esc[:0]
+	ap.gap = false
 	if bytes.IndexByte(text, '&') >= 0 {
 		// Sized once, before a single word can point into it. See atomParser.esc.
 		internal.SliceReuse(&ap.esc, len(text))
@@ -313,6 +331,7 @@ func (ap *atomParser) parse(text []byte, base Style) []atom {
 		switch {
 		case tag == "br" || tag == "br/" || tag == "br /":
 			ap.atoms = append(ap.atoms, atom{brk: true})
+			ap.gap = true // A line break separates as surely as a space.
 		case tag == "b":
 			cur := stack[len(stack)-1]
 			cur.bold = true
@@ -368,13 +387,19 @@ func (ap *atomParser) appendWordsRaw(s []byte, cur spanStyle, family string) {
 	for i := 0; i < len(s); {
 		for i < len(s) && isSpace(s[i]) {
 			i++
+			ap.gap = true
 		}
 		j := i
 		for j < len(s) && !isSpace(s[j]) {
 			j++
 		}
 		if j > i {
-			ap.atoms = append(ap.atoms, atom{word: s[i:j], font: f, size: cur.size, col: cur.col, href: cur.href})
+			// The gap is carried across runs, so a tag between two words is not
+			// itself a separator: only whitespace is.
+			glue := !ap.gap && len(ap.atoms) > 0
+			ap.atoms = append(ap.atoms, atom{word: s[i:j], glue: glue,
+				font: f, size: cur.size, col: cur.col, href: cur.href})
+			ap.gap = false
 		}
 		i = j
 	}

@@ -8,19 +8,40 @@ import (
 	"github.com/soypat/piudf/piupage"
 )
 
-// run is one text run a canvas emitted: where it was set, and what it says.
+// run is one text run a canvas emitted: where it was set, what it says, and the
+// face it was set in — without which its width cannot be measured.
 type run struct {
 	x    float64
 	text string
+	font piupage.Font
+	size float64
 }
 
-// runsOf reads the "x y Td(text)Tj" runs out of a content stream, in order. The
-// operator runs together with its string, which is why it is matched by prefix.
+// width is the run's rendered width, and end the x it reaches.
+func (r run) width() float64 { return piupage.StringWidth(r.font, r.text, r.size) }
+func (r run) end() float64   { return r.x + r.width() }
+
+// runsOf reads the "/Fn size Tf … x y Td(text)Tj" runs out of a content stream,
+// in order. Operators run together with their operands, hence the prefix matches.
 func runsOf(t testing.TB, cv *piupage.Canvas) []run {
 	t.Helper()
 	var out []run
+	var cur piupage.Font
+	var size float64
+	fonts := cv.Fonts()
 	f := strings.Fields(string(cv.Bytes()))
 	for i, tok := range f {
+		if j := strings.Index(tok, "/F"); j >= 0 && i+2 < len(f) && f[i+2] == "Tf" {
+			n, err := strconv.Atoi(tok[j+2:])
+			if err != nil || n < 1 || n > len(fonts) {
+				t.Fatalf("bad font resource %q (have %d)", tok, len(fonts))
+			}
+			if size, err = strconv.ParseFloat(f[i+1], 64); err != nil {
+				t.Fatalf("bad Tf size %q: %v", f[i+1], err)
+			}
+			cur = fonts[n-1]
+			continue
+		}
 		if i < 2 || !strings.HasPrefix(tok, "Td(") {
 			continue
 		}
@@ -28,13 +49,28 @@ func runsOf(t testing.TB, cv *piupage.Canvas) []run {
 		if err != nil {
 			t.Fatalf("bad Td operand %q: %v", f[i-2], err)
 		}
-		text := tok[len("Td("):]
-		if j := strings.IndexByte(text, ')'); j >= 0 {
-			text = text[:j]
-		}
-		out = append(out, run{x: x, text: text})
+		out = append(out, run{x: x, text: pdfString(tok[len("Td("):]), font: cur, size: size})
 	}
 	return out
+}
+
+// pdfString reads a literal string's content up to its unescaped ')'. The
+// emitter backslash-escapes '(', ')' and '\', so "time.Now()" arrives as
+// "time.Now\(\)" and a scan for a bare ')' would stop inside the word.
+func pdfString(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			i++
+			b.WriteByte(s[i])
+		case s[i] == ')':
+			return b.String()
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 // runXs is runsOf reduced to the positions, for tests that only place lines.
@@ -67,11 +103,10 @@ func TestJustifyFillsTheMeasure(t *testing.T) {
 	if len(runs) < 20 {
 		t.Fatalf("only %d runs drawn; the text did not wrap", len(runs))
 	}
-	hel, _ := piupage.Standard14("Helvetica")
 	var ends []float64
 	for i, r := range runs {
 		if i+1 == len(runs) || runs[i+1].x < r.x {
-			ends = append(ends, r.x+piupage.StringWidth(hel, r.text, st.Size))
+			ends = append(ends, r.end())
 		}
 		if i == 0 || runs[i].x < runs[i-1].x {
 			if r.x != f.X {

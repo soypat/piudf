@@ -202,7 +202,8 @@ func (bld *Builder) pack(src []atom) (text []byte, out []piece) {
 			text = append(text, a.word...)
 			word = text[start:]
 		}
-		out[i] = piece{text: word, font: a.font, size: a.size, col: a.col, href: packedHref, brk: a.brk}
+		out[i] = piece{text: word, font: a.font, size: a.size, col: a.col,
+			href: packedHref, brk: a.brk, glue: a.glue}
 	}
 	return text, out
 }
