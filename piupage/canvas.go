@@ -23,7 +23,10 @@ type Canvas struct {
 	curSize float64
 	// links records the page's link areas. They are annotations, not content,
 	// so the Canvas only collects them; the page writer emits them.
-	links  []Link
+	links []Link
+	// images lists the images referenced in first-use order, assigning
+	// /Im1, /Im2 … the way used does for fonts.
+	images []Image
 	glyphs []GlyphUse
 	// Text encodes
 	enc []byte
@@ -42,6 +45,7 @@ type Mark struct {
 	n       int
 	fonts   int
 	links   int
+	images  int
 	glyphs  int
 	curFont Font
 	curSize float64
@@ -54,7 +58,8 @@ type Mark struct {
 func (c *Canvas) Mark() Mark {
 	c.emit.Flush()
 	return Mark{
-		n: c.buf.Len(), fonts: len(c.used), links: len(c.links), glyphs: len(c.glyphs),
+		n: c.buf.Len(), fonts: len(c.used), links: len(c.links),
+		images: len(c.images), glyphs: len(c.glyphs),
 		curFont: c.curFont, curSize: c.curSize,
 		ctm: c.ctm, depth: c.depth,
 	}
@@ -65,12 +70,14 @@ func (c *Canvas) Mark() Mark {
 // [Canvas.Reset] is a programming error and does nothing.
 func (c *Canvas) Rewind(m Mark) {
 	c.emit.Flush()
-	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) || m.glyphs > len(c.glyphs) {
+	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) ||
+		m.images > len(c.images) || m.glyphs > len(c.glyphs) {
 		return
 	}
 	c.buf.Truncate(m.n)
 	c.used = c.used[:m.fonts]
 	c.links = c.links[:m.links]
+	c.images = c.images[:m.images]
 	c.glyphs = c.glyphs[:m.glyphs]
 	c.curFont = m.curFont
 	c.curSize = m.curSize
@@ -85,6 +92,7 @@ func (c *Canvas) Reset(emitScratch []byte) error {
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
+	c.images = c.images[:0]
 	c.glyphs = c.glyphs[:0]
 	c.ctm = Identity()
 	c.depth = 0
@@ -176,6 +184,53 @@ func (c *Canvas) ensure(f Font) int {
 	}
 	c.used = append(c.used, f)
 	return len(c.used)
+}
+
+// Image draws im into the rectangle w by h whose lower-left corner is at
+// (x, y), registering it in this page's resources.
+//
+// PDF paints an image into the unit square, so the rectangle is the whole of
+// the placement: w and h are a scale, and the raster's own size never reaches
+// the page. An image drawn 100 points wide is 100 points wide whether it holds
+// a thumbnail or a photograph, and what that leaves for samples per point is
+// the caller's to decide.
+//
+// Drawing one image twice costs its bytes once. The two uses resolve to the
+// same resource, so a mark repeated down a page, or a logo on every page of a
+// document, is written to the file a single time.
+func (c *Canvas) Image(im Image, x, y, w, h float64) {
+	if err := im.Valid(); err != nil {
+		c.emit.Fail(err)
+		return
+	}
+	if w == 0 || h == 0 {
+		return
+	}
+	num := c.ensureImage(im)
+	// Saved and restored rather than left standing: Do is the only operator
+	// that reads this transform, and a cm that outlived it would move whatever
+	// was drawn next.
+	s := c.Save()
+	c.Transform(Matrix{A: w, D: h, E: x, F: y})
+	c.emit.NameNum("Im", int64(num))
+	c.emit.Ident("Do")
+	c.emit.EOL()
+	c.Restore(s)
+}
+
+// Images returns the images the canvas referenced, in the order their resource
+// names were assigned. The page writer needs them to build /XObject.
+func (c *Canvas) Images() []Image { return c.images }
+
+// ensureImage registers im and returns its resource number ("Im1"…).
+func (c *Canvas) ensureImage(im Image) int {
+	for i := range c.images {
+		if c.images[i].SameAs(im) {
+			return i + 1
+		}
+	}
+	c.images = append(c.images, im)
+	return len(c.images)
 }
 
 // Text draws s with its baseline origin at (x, y) in the current font and fill

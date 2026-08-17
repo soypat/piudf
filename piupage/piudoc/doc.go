@@ -105,6 +105,11 @@ type Doc struct {
 	// deduplicated, naming its font by index into fonts.
 	glyphs  []piupage.GlyphUse
 	pageIDs []piudf.ObjectID
+	// images is every distinct image the pages drew and imageids the object
+	// each was written as, so that one photograph on ten pages is ten
+	// references to a single stream.
+	images   []piupage.Image
+	imageids []piudf.ObjectID
 	// annots is scratch: the link annotations of the page being written.
 	annots []piudf.ObjectID
 }
@@ -140,6 +145,8 @@ func (d *Doc) Reset(w io.Writer, encBuf []byte) (err error) {
 	d.fonts = d.fonts[:0]
 	d.glyphs = d.glyphs[:0]
 	d.fontids = d.fontids[:0]
+	d.images = d.images[:0]
+	d.imageids = d.imageids[:0]
 	d.marks = d.marks[:0]
 	d.annots = d.annots[:0]
 	return nil
@@ -253,6 +260,25 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		d.fontids = append(d.fontids, id)
 	}
 
+	// Images go the way fonts just did: gathered across the batch, written once
+	// each, and reached from every page that drew them. They are streams rather
+	// than annotations, so they must be out before a page dictionary is opened.
+	imageFirst := len(d.images)
+	for icv := range nCanv {
+		for _, im := range dst[icv].Images() {
+			if d.imageidx(im) < 0 {
+				d.images = append(d.images, im)
+			}
+		}
+	}
+	for i := imageFirst; i < len(d.images); i++ {
+		id, err := piupage.WriteImage(&d.enc, d.images[i])
+		if err != nil {
+			return nCanv, nStories, err
+		}
+		d.imageids = append(d.imageids, id)
+	}
+
 	d.pageIDs = append(d.pageIDs, make([]piudf.ObjectID, nCanv)...)
 	for icv := range nCanv {
 		cv := &dst[icv]
@@ -322,6 +348,20 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 			d.enc.Ref(id.Num, id.Gen)
 		}
 		d.enc.DictClose()
+		// An /XObject entry is written only by a page that draws one, which is
+		// most pages not at all.
+		if images := cv.Images(); len(images) > 0 {
+			d.enc.Name("XObject")
+			d.enc.DictOpen()
+			for i, im := range images {
+				// The canvas named it /Im(i+1) locally; the object it resolves
+				// to is the document's, shared with every other page drawing it.
+				d.enc.NameNum("Im", int64(i+1))
+				id := d.imageids[d.imageidx(im)]
+				d.enc.Ref(id.Num, id.Gen)
+			}
+			d.enc.DictClose()
+		}
 		d.enc.DictClose()
 		d.enc.DictClose()
 		d.enc.EndObject()
@@ -407,6 +447,17 @@ func (d *Doc) close() error {
 	d.enc.DictClose()
 	d.enc.EndObject()
 	return d.enc.Close(d.catalog, info)
+}
+
+// imageidx is where im sits in the document's images, or -1 if this is the
+// first page to draw it.
+func (d *Doc) imageidx(im piupage.Image) int {
+	for i := range d.images {
+		if d.images[i].SameAs(im) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (d *Doc) fontidx(basename string) int {
