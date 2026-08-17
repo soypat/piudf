@@ -8,14 +8,40 @@ import (
 
 // Stack composes elements to be drawn one above another in whatever frame the
 // stack is given.
-func (bld *Builder) Stack(elems ...Drawer) Drawer { return stack(elems) }
+func (bld *Builder) Stack(elems ...Drawer) Drawer { return &stack{elems: elems} }
 
-// stack is what [Builder.Stack] returns.
-type stack []Drawer
+// KeepTogether is [Builder.Stack] that will not break across pages: it moves to
+// the next page whole rather than leave a heading behind its first paragraph.
+func (bld *Builder) KeepTogether(elems ...Drawer) Drawer {
+	return &stack{elems: elems, keep: true}
+}
 
-func (s stack) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
+// stack is what [Builder.Stack] and [Builder.KeepTogether] return.
+type stack struct {
+	elems []Drawer
+	keep  bool
+}
+
+func (s *stack) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd float64, err error) {
 	y := yTop
-	for _, d := range s {
+	// An unbounded frame never breaks, so measuring against one would only
+	// recurse: Measure draws through this same method.
+	if s.keep && y < f.Top && f.Bottom != noBreak {
+		h, err := Measure(dst, s, f, y)
+		if err != nil {
+			return 0, y, err
+		}
+		// A group taller than a whole page cannot be helped by moving it, so it
+		// overflows where it stands rather than skipping a page to no purpose.
+		if y-h < f.Bottom && h <= f.Height() {
+			adv++
+			if adv >= len(dst) {
+				return adv, y, io.ErrShortBuffer
+			}
+			y = f.Top
+		}
+	}
+	for _, d := range s.elems {
 		if d == nil {
 			continue
 		}
@@ -31,7 +57,7 @@ func (s stack) Draw(dst []piupage.Canvas, f Frame, yTop float64) (adv int, yEnd 
 	return adv, y, nil
 }
 
-func (s stack) Unwrap() []Drawer { return s }
+func (s *stack) Unwrap() []Drawer { return s.elems }
 
 // ColStyle is how a row of columns is laid out.
 type ColStyle struct {

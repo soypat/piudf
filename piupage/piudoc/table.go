@@ -25,6 +25,8 @@ const (
 	opBackground
 	opLineBelow
 	opLineAbove
+	opLineLeft
+	opLineRight
 	opBox
 	opGrid
 )
@@ -100,6 +102,16 @@ func (s Sel) LineAbove(w float64, col color.Color) Sel {
 // LineBelow strokes a line under each row of the selection.
 func (s Sel) LineBelow(w float64, col color.Color) Sel {
 	return s.op(tableOp{kind: opLineBelow, f: w, col: col})
+}
+
+// LineLeft strokes a line down the left edge of the selection.
+func (s Sel) LineLeft(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opLineLeft, f: w, col: col})
+}
+
+// LineRight strokes a line down the right edge of the selection.
+func (s Sel) LineRight(w float64, col color.Color) Sel {
+	return s.op(tableOp{kind: opLineRight, f: w, col: col})
 }
 
 // Box strokes the outer border of the selection.
@@ -288,7 +300,7 @@ func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) 
 	ncol, nrow := len(t.widths), len(t.Rows)
 	for _, op := range t.Style.ops {
 		switch op.kind {
-		case opLineBelow, opLineAbove, opBox, opGrid:
+		case opLineBelow, opLineAbove, opLineLeft, opLineRight, opBox, opGrid:
 		default:
 			continue
 		}
@@ -313,6 +325,10 @@ func (t *Table) drawRules(cv *piupage.Canvas, f Frame, r int, top, bot float64) 
 			cv.Line(left, bot, right, bot, lw, op.col)
 		case opLineAbove:
 			cv.Line(left, top, right, top, lw, op.col)
+		case opLineLeft:
+			cv.Line(left, top, left, bot, lw, op.col)
+		case opLineRight:
+			cv.Line(right, top, right, bot, lw, op.col)
 		case opBox, opGrid:
 			if r == r0 {
 				cv.Line(left, top, right, top, lw, op.col)

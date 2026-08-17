@@ -64,7 +64,7 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 	for i := range p.line {
 		pc := &p.line[i]
 		if pc.brk {
-			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, a)
+			adv, y, err = p.emitLine(dst, f, p.line[start:i], adv, y, avail, lineW, maxSize, lastLine(a))
 			if err != nil {
 				return adv, y, err
 			}
@@ -88,11 +88,21 @@ func (p *Paragraph) drawAligned(dst []piupage.Canvas, f Frame, yTop float64, a A
 			maxSize = pc.size
 		}
 	}
-	adv, y, err = p.emitLine(dst, f, p.line[start:], adv, y, avail, lineW, maxSize, a)
+	adv, y, err = p.emitLine(dst, f, p.line[start:], adv, y, avail, lineW, maxSize, lastLine(a))
 	if err != nil {
 		return adv, y, err
 	}
 	return adv, y - p.Style.SpaceAfter, nil
+}
+
+// lastLine is a for the line that ends a paragraph or precedes a break, where
+// justification sets flush left: stretching a short final line is the way that
+// setting is done badly.
+func lastLine(a Align) Align {
+	if a == Justify {
+		return Left
+	}
+	return a
 }
 
 // emitLine paints one line's pieces at the cursor, moving to the next page
@@ -113,11 +123,20 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 	cv := &dst[adv]
 	x0 := f.X + p.Style.LeftIndent
 	startX := x0
+	// extra is the slack a justified line spreads across its gaps, so that its
+	// last word ends exactly on the measure.
+	extra := 0.0
 	switch a {
 	case Right:
 		startX = x0 + avail - lineW
 	case Center:
 		startX = x0 + (avail-lineW)/2
+	case Justify:
+		// A line of one word has nowhere to put the slack, and one that already
+		// overruns has none to give.
+		if gaps := len(line) - 1; gaps > 0 && avail > lineW {
+			extra = (avail - lineW) / float64(gaps)
+		}
 	}
 	h := maxf(maxSize, p.Style.Size)
 	base := y - 0.8*h
@@ -145,7 +164,7 @@ func (p *Paragraph) emitLine(dst []piupage.Canvas, f Frame, line []piece, adv in
 				p.closeRun(cv, runHref, runX, px, base, h)
 				runHref, runX = spHref, px
 			}
-			px += piupage.StringWidth(pc.font, " ", pc.size)
+			px += piupage.StringWidth(pc.font, " ", pc.size) + extra
 		}
 		if !bytes.Equal(pc.href, runHref) {
 			p.closeRun(cv, runHref, runX, px, base, h)
