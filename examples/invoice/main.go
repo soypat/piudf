@@ -28,9 +28,7 @@ func main() {
 		out = os.Args[1]
 	}
 	f, err := os.Create(out)
-	if err != nil {
-		fatal(err)
-	}
+	must(err)
 	defer f.Close()
 
 	// Styles, mirroring the reportlab ParagraphStyles.
@@ -38,8 +36,8 @@ func main() {
 	small := doc.Style{Font: "Helvetica", Size: 8.5, Leading: 11.5, Color: GREY}
 	label := doc.Style{Font: "Helvetica", Size: 8, Leading: 11, Color: GREY, SpaceAfter: 1}
 	h1 := doc.Style{Font: "Helvetica-Bold", Size: 20, Leading: 24, Color: DARK}
-	smallBold := doc.Style{Font: "Helvetica-Bold", Size: 8.5, Leading: 11.5, Color: GREY}
 	tot := doc.Style{Font: "Helvetica", Size: 12, Leading: 15, Color: DARK}
+	grey := func(s string) string { return `<font size="8" color="#555555">` + s + `</font>` }
 	start := time.Now()
 	d := &doc.Doc{
 		Size:    doc.SizeA4(),
@@ -61,28 +59,22 @@ func main() {
 		ColWidths: []float64{118 * mm, 48 * mm},
 		Style:     metaStyle,
 		Rows: [][]doc.Cell{{
-			doc.Cell{Drawer: bld.Text("COMMERCIAL INVOICE", h1)},
-			doc.Cell{Drawer: bld.P(
-				`<font size="8" color="#555555">INVOICE No.</font><br/>`+
-					`<b>0001-2026</b><br/>`+
-					`<font size="8" color="#555555">DATE</font><br/>`+
-					`<b>July 7, 2026</b>`, base)},
+			{Drawer: bld.Text("COMMERCIAL INVOICE", h1)},
+			{Drawer: bld.P(grey("INVOICE No.")+`<br/><b>0001-2026</b><br/>`+
+				grey("DATE")+`<br/><b>July 7, 2026</b>`, base)},
 		}},
-	})
-	story = append(story, doc.Spacer{H: 6})
-	story = append(story, doc.HRule{Thickness: 1.2, Color: DARK})
-	story = append(story, doc.Spacer{H: 12})
+	}, doc.Spacer{H: 6}, doc.HRule{Thickness: 1.2, Color: DARK}, doc.Spacer{H: 12})
 
 	// From / To.
 	seller := bld.P(
-		`<font size="8" color="#555555"><b>FROM (SELLER)</b></font><br/>`+
+		grey("<b>FROM (SELLER)</b>")+`<br/>`+
 			`<b>Jane Doe</b><br/>`+
 			`Independent Software Developer<br/>`+
 			`123 Example Avenue (A0000)<br/>`+
 			`Sample City, Country<br/>`+
 			`Tax ID: 00-00000000-0`, base)
 	buyer := bld.P(
-		`<font size="8" color="#555555"><b>BILL TO (BUYER)</b></font><br/>`+
+		grey("<b>BILL TO (BUYER)</b>")+`<br/>`+
 			`<b>Acme GmbH</b><br/>`+
 			"c/o Beispielstraße 2-4<br/>"+
 			"Musterstraße 12, 10000 Berlin<br/>"+
@@ -93,10 +85,8 @@ func main() {
 	story = append(story, &doc.Table{
 		ColWidths: []float64{83 * mm, 83 * mm},
 		Style:     ftStyle,
-		Rows:      [][]doc.Cell{{doc.Cell{Drawer: seller}, doc.Cell{Drawer: buyer}}},
-	})
-
-	story = append(story, doc.Spacer{H: 16})
+		Rows:      [][]doc.Cell{{{Drawer: seller}, {Drawer: buyer}}},
+	}, doc.Spacer{H: 16})
 
 	// Line items.
 	desc := bld.P(
@@ -104,8 +94,7 @@ func main() {
 			"Integration of networking stack into a client VPN software "+
 			"(overlay network). Design, implementation and testing "+
 			"of the agreed milestone.<br/>"+
-			`<font size="8" color="#555555">Service period: June – July 2026. `+
-			"Services rendered remotely.</font>", base)
+			grey("Service period: June – July 2026. Services rendered remotely."), base)
 	var itemsStyle doc.TableStyle
 	itemsStyle.All().Valign(doc.Top).Pad(doc.Padding{Top: 2, Bottom: 2})
 	itemsStyle.Row(0).LineBelow(0.8, DARK)
@@ -115,11 +104,10 @@ func main() {
 		ColWidths: []float64{136 * mm, 30 * mm},
 		Style:     itemsStyle,
 		Rows: [][]doc.Cell{
-			{doc.Cell{Drawer: bld.P("<b>DESCRIPTION</b>", smallBold)}, doc.Cell{Drawer: bld.P("<b>AMOUNT (USD)</b>", smallBold)}},
-			{doc.Cell{Drawer: desc}, doc.Cell{Drawer: bld.Text("343.00", base)}},
+			{{Drawer: bld.P("<b>DESCRIPTION</b>", small)}, {Drawer: bld.P("<b>AMOUNT (USD)</b>", small)}},
+			{{Drawer: desc}, {Drawer: bld.Text("343.00", base)}},
 		},
-	})
-	story = append(story, doc.Spacer{H: 4})
+	}, doc.Spacer{H: 4})
 
 	// Totals.
 	var totStyle doc.TableStyle
@@ -129,16 +117,14 @@ func main() {
 		ColWidths: []float64{96 * mm, 40 * mm, 30 * mm},
 		Style:     totStyle,
 		Rows: [][]doc.Cell{{
-			doc.Cell{},
-			doc.Cell{Drawer: bld.P(`<font size="8" color="#555555">TOTAL</font>`, base)},
-			doc.Cell{Drawer: bld.P("<b>USD 343.00</b>", tot)},
+			{},
+			{Drawer: bld.P(grey("TOTAL"), base)},
+			{Drawer: bld.P("<b>USD 343.00</b>", tot)},
 		}},
-	})
-	story = append(story, doc.Spacer{H: 18})
+	}, doc.Spacer{H: 18})
 
 	// Payment details.
-	story = append(story, bld.P("<b>PAYMENT DETAILS</b>", label))
-	story = append(story, doc.Spacer{H: 3})
+	story = append(story, bld.P("<b>PAYMENT DETAILS</b>", label), doc.Spacer{H: 3})
 	payRow := func(k, v string) []doc.Cell {
 		return []doc.Cell{{Drawer: bld.P(k, small)}, {Drawer: bld.P(v, base)}}
 	}
@@ -156,11 +142,7 @@ func main() {
 			payRow("Note", "USD 15.00 transfer fee deducted at withdrawal; "+
 				"net amount transferred: USD 328.00."),
 		},
-	})
-	story = append(story, doc.Spacer{H: 14})
-
-	story = append(story, doc.HRule{Thickness: 0.5, Color: LIGHT})
-	story = append(story, doc.Spacer{H: 8})
+	}, doc.Spacer{H: 14}, doc.HRule{Thickness: 0.5, Color: LIGHT}, doc.Spacer{H: 8})
 	// The footnote's <a href> becomes a /Link annotation on whichever page it lands on.
 	footnote := small
 	footnote.Link = doc.LinkStyle{Color: canvas.HexColor("#0645AD"), Underline: true}
@@ -175,19 +157,16 @@ func main() {
 
 	// The document owns no memory of its own: the pages it may use, their
 	// content buffers and the encoder's are all supplied here.
-	if err := bld.Err(); err != nil {
-		fatal(err)
-	}
-
+	must(bld.Err())
 	const maxPages = 4
 	pages := make([]canvas.Canvas, maxPages)
-	if err := d.Build(f, pages, story, make([]byte, 4096), make([]byte, maxPages*4096)); err != nil {
-		fatal(err)
-	}
+	must(d.Build(f, pages, story, make([]byte, 4096), make([]byte, maxPages*4096)))
 	fmt.Println("wrote", out, "in", time.Since(start).Round(time.Microsecond))
 }
 
-func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "invoice:", err)
-	os.Exit(1)
+func must(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invoice:", err)
+		panic(err)
+	}
 }
