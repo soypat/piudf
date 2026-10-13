@@ -127,7 +127,20 @@ func (s *objStm) reset() {
 }
 
 // Filtered reports whether the payload needs decoding to be read.
-func (sp StreamPayload) Filtered() bool { return sp.codec.flate }
+func (sp StreamPayload) Filtered() bool { return sp.codec.nfilters > 0 }
+
+// NumFilters returns the length of the payload's /Filter chain.
+func (sp StreamPayload) NumFilters() int { return int(sp.codec.nfilters) }
+
+// Filter returns the i'th filter of the chain, in the order they decode: the
+// first undoes the last encoding applied. A payload whose only filter is
+// [FilterDCT] or [FilterJPX] is an image file as it stands.
+func (sp StreamPayload) Filter(i int) Filter {
+	if i < 0 || i >= int(sp.codec.nfilters) {
+		return FilterUnknown
+	}
+	return sp.codec.filters[i]
+}
 
 // StreamPayload returns where stream object v's payload lives. /Length may be
 // an indirect reference — legal for every stream but the cross-reference ones
@@ -193,7 +206,9 @@ func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, s *Stream, codec *Codec) (io.
 }
 
 // OpenPayload returns a reader over the decoded bytes of sp, for callers that
-// already located it.
+// already located it. A chain this package cannot decode fails with
+// [ErrUnsupportedFilter]; sp still locates the encoded bytes for a caller that
+// can.
 //
 // The returned reader is the caller's: it owns an inflate window of its own
 // rather than borrowing the Codec's, which is what lets it outlive the next
@@ -201,13 +216,17 @@ func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, s *Stream, codec *Codec) (io.
 // package is built for — should reach for [PDF.Resolve] and friends instead,
 // which reuse the Codec's cursors.
 func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, s *Stream) (io.Reader, error) {
+	if err := sp.codec.internalErr(); err != nil {
+		// Not an internal stream, but the same chains are all that decode.
+		return nil, err
+	}
 	if sp.codec.predictor > 1 {
 		// TODO: predictors. A cross-reference stream needs them and reads rows
 		// rather than bytes, which is xrefRows' business; a content stream
 		// does not.
 		return nil, errTODO
 	}
-	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
+	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate()); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -246,6 +265,9 @@ func (pdf *PDF) loadObjStm(r io.ReaderAt, num uint32, codec *Codec) error {
 	if nV.I < 0 || firstV.I < 0 || firstV.I > sp.Length*maxInflateRatio {
 		return errObjStmBad
 	}
+	if err = sp.codec.internalErr(); err != nil {
+		return err
+	}
 	if sp.codec.predictor > 1 {
 		// TODO: predictors on an object stream. They exist to make a table of
 		// similar rows compress; an object stream is not one, and only a
@@ -255,7 +277,7 @@ func (pdf *PDF) loadObjStm(r io.ReaderAt, num uint32, codec *Codec) error {
 	// num is cleared first: a failed reset must not leave the cursor claiming
 	// to hold a stream it does not.
 	stm.num = 0
-	if err = stm.data.Reset(r, sp.Offset, sp.Length, sp.codec.flate); err != nil {
+	if err = stm.data.Reset(r, sp.Offset, sp.Length, sp.codec.flate()); err != nil {
 		return err
 	}
 	stm.num, stm.n, stm.first = num, nV.I, firstV.I

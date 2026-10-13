@@ -113,7 +113,7 @@ func (x *xrefRows) restart(r io.ReaderAt, s *xrefSection) error {
 	default:
 		return errTODO // TIFF predictor 2, or a value the format does not define.
 	}
-	return x.data.Reset(r, s.fileOff, s.length, sc.flate)
+	return x.data.Reset(r, s.fileOff, s.length, sc.flate())
 }
 
 // next decodes the row after the current one, which is the only way forward.

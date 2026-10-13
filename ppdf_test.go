@@ -2,6 +2,7 @@ package piudf
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -182,7 +183,7 @@ func TestDecodeXrefStream(t *testing.T) {
 		if s.codec.w[1] == 0 {
 			t.Errorf("section %d has zero /W offset width", i)
 		}
-		if !s.codec.flate {
+		if !s.codec.flate() {
 			t.Errorf("section %d is not FlateDecode", i)
 		}
 		rows += s.count
@@ -855,5 +856,110 @@ func TestUnfilterPNGBadFilter(t *testing.T) {
 	cur, prev := []byte{1, 2, 3}, []byte{0, 0, 0}
 	if err := unfilterPNG(cur, prev, 5); err != errXrefStreamBad {
 		t.Errorf("filter 5 = %v, want errXrefStreamBad", err)
+	}
+}
+
+// TestStreamPayloadFilters pins that locating a payload never depends on being
+// able to decode it: every chain is named, and only OpenPayload refuses.
+func TestStreamPayloadFilters(t *testing.T) {
+	cases := []struct {
+		dict      string
+		want      []Filter
+		predictor uint8
+		colors    uint8
+		decodes   bool
+	}{
+		{dict: "", want: nil, decodes: true},
+		{dict: "/Filter /FlateDecode", want: []Filter{FilterFlate}, decodes: true},
+		{dict: "/Filter /DCTDecode", want: []Filter{FilterDCT}},
+		{dict: "/Filter [/DCTDecode]", want: []Filter{FilterDCT}},
+		{dict: "/Filter /JPXDecode", want: []Filter{FilterJPX}},
+		{dict: "/Filter /Bogus", want: []Filter{FilterUnknown}},
+		{dict: "/Filter [/ASCII85Decode /FlateDecode] /DecodeParms [null << /Predictor 15 /Colors 3 >>]",
+			want: []Filter{FilterASCII85, FilterFlate}, predictor: 15, colors: 3},
+		{dict: "/Filter [/FlateDecode /DCTDecode] /DecodeParms [<< /Predictor 12 >> null]",
+			want: []Filter{FilterFlate, FilterDCT}, predictor: 12, colors: 1},
+		// Parameters on a filter that takes no predictor are not read as one.
+		{dict: "/Filter /DCTDecode /DecodeParms << /ColorTransform 0 >>", want: []Filter{FilterDCT}},
+	}
+	var out bytes.Buffer
+	var e Encoder
+	if err := e.Reset(&out, make([]byte, 64)); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]ObjectID, len(cases))
+	for i, tc := range cases {
+		ids[i] = e.NewID()
+		e.BeginObject(ids[i])
+		e.Raw([]byte("<< /Length 3 " + tc.dict + " >>"))
+		e.BeginStreamPayload()
+		e.Raw([]byte("abc"))
+		e.EndStreamPayload()
+		e.EndObject()
+	}
+	cat := e.NewID()
+	e.BeginObject(cat)
+	e.Raw([]byte("<< /Type /Catalog >>"))
+	e.EndObject()
+	if err := e.Close(cat, ObjectID{}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := bytes.NewReader(out.Bytes())
+	codec := newCodec(make([]byte, 4096))
+	var p PDF
+	if err := p.Decode(r, r.Size(), codec); err != nil {
+		t.Fatal(err)
+	}
+	var strm Stream
+	strm.ConfigureDefault()
+	for i, tc := range cases {
+		v, err := p.Resolve(r, ids[i], codec)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.dict, err)
+		}
+		sp, err := p.StreamPayload(r, v, codec)
+		if err != nil {
+			t.Fatalf("%q: StreamPayload: %v", tc.dict, err)
+		}
+		if sp.Length != 3 {
+			t.Errorf("%q: Length = %d, want 3", tc.dict, sp.Length)
+		}
+		if got := sp.NumFilters(); got != len(tc.want) {
+			t.Fatalf("%q: NumFilters = %d, want %d", tc.dict, got, len(tc.want))
+		}
+		for j, f := range tc.want {
+			if got := sp.Filter(j); got != f {
+				t.Errorf("%q: Filter(%d) = %v, want %v", tc.dict, j, got, f)
+			}
+		}
+		if tc.predictor != 0 && (sp.codec.predictor != tc.predictor || sp.codec.colors != tc.colors) {
+			t.Errorf("%q: predictor %d colors %d, want %d %d", tc.dict,
+				sp.codec.predictor, sp.codec.colors, tc.predictor, tc.colors)
+		}
+		// "abc" is not a zlib stream, so a Flate payload may fail later; what
+		// is pinned here is only whether the chain is refused up front.
+		_, err = p.OpenPayload(r, sp, &strm)
+		if refused := errors.Is(err, ErrUnsupportedFilter); refused == tc.decodes {
+			t.Errorf("%q: OpenPayload err = %v, decodable = %v", tc.dict, err, tc.decodes)
+		}
+	}
+}
+
+func TestFilterString(t *testing.T) {
+	for _, tc := range []struct {
+		f    Filter
+		want string
+	}{
+		{FilterFlate, "FlateDecode"},
+		{FilterDCT, "DCTDecode"},
+		{FilterUnknown, "Unknown"},
+	} {
+		if got := tc.f.String(); got != tc.want {
+			t.Errorf("%d.String() = %q, want %q", tc.f, got, tc.want)
+		}
+		if tc.f != FilterUnknown && filterByName([]byte(tc.want)) != tc.f {
+			t.Errorf("filterByName(%q) != %v", tc.want, tc.f)
+		}
 	}
 }

@@ -11,54 +11,6 @@ import (
 	"github.com/soypat/piudf/piulex"
 )
 
-//go:generate go tool stringer -type=genericErr -linecomment -output=stringers.go
-
-type genericErr uint8
-
-const (
-	_                     genericErr = iota
-	ErrMissingHeader                 // missing %PDF- header
-	ErrMissingStartXref              // missing startxref
-	ErrMalformedStartXref            // malformed startxref
-	ErrIncompleteReadAt              // ReadAt did incomplete read
-	ErrOOBXref                       // xref offset out of file bounds
-	ErrCodecMemLimit                 // Codec memory limit hit
-	ErrCodecDepthLimit               // Codec depth limit hit
-	ErrInvalidCodecConfig            // Codec invalid config
-	errTODO                          // PDF feature not implemented yet
-	errValueMismatch                 // value kind/type mismatch
-	errNameTooLong                   // name longer than implementation limit
-	errObjectNotFound                // object number outside every xref section
-	errObjectIDMismatch              // object header does not match its xref entry
-	errNotAStream                    // value is not a stream object
-	errStreamBadLength               // stream /Length missing or out of bounds
-	errObjStmNested                  // object stream within an object stream
-	errObjStmBad                     // object stream /N, /First or offset out of bounds
-	errEncoderState                  // Encoder method called out of sequence
-	errEncoderBase                   // Encoder base document unusable for append
-	// Lexer errors below.
-	_errLexErrorsStart              //
-	errXrefStreamBad                // xref stream generic error
-	errXrefStreamMissingDict        // xref stream missing dict
-	errXrefStreamMissingTok         // xref stream missing 'stream' keyword
-	ErrIllegalToken                 // illegal token
-	errUnexpectedToken              // unexpected token
-	ErrPrevLoop                     // /Prev loop found
-	errPrevChainTooLong             // /Prev chain too long
-	errExpectedXref                 // expected 'xref' keyword
-	errBadSubsectionStart           // bad subsection start/entry
-	errExpectingSubsectionOrTrailer // unexpected token looking for subsections or trailer
-	errBadXrefStreamObjectHeader    // bad xref stream object header
-	errBadObjectHeader              // bad 'N G obj' object header
-	errUnexpectedEOF                // unexpected end of file
-)
-
-func (g genericErr) Error() string { return g.String() }
-
-// IsLexed signals the error was encountered during lexing, so the [piulex.Lexer]
-// has state on where the error was encountered in Pos and Error methods.
-func (g genericErr) IsLexed() bool { return g > _errLexErrorsStart }
-
 type PDF struct {
 	sections []xrefSection
 	revs     []Revision
@@ -196,27 +148,46 @@ type XrefEntry struct {
 	Kind XrefKind
 }
 
-// streamCodec is the decoded /W, /Filter and /DecodeParms of an internal
-// (xref or object) stream: everything needed to turn its payload back into
-// rows. Only FlateDecode, optionally behind a predictor, is valid on one. The
-// zero value decodes nothing; see readCodec for the defaults the format
-// mandates.
+// streamCodec is the decoded /W, /Filter and /DecodeParms of a stream:
+// everything needed to turn its payload back into bytes or rows. Any filter
+// chain is recorded; what may be decoded is the reader's decision, and an
+// internal (xref or object) stream admits only FlateDecode, optionally behind
+// a predictor (see internalErr). The zero value decodes nothing; see readCodec
+// for the defaults the format mandates.
 type streamCodec struct {
 	// w is /W, the row layout: three big-endian field widths. It is a decode
 	// parameter like the ones below, and a classic table has no equivalent —
 	// its 10/5/1 record shape is fixed by ISO 32000-1 7.5.4 and lives in
 	// parseClassicRecord, not in any field.
-	w         [3]uint8
+	w [3]uint8
+	// filters is the /Filter chain in application order, first nfilters valid.
+	filters  [maxFilters]Filter
+	nfilters uint8
+	// The predictor parameters are those of the chain's Flate or LZW filter,
+	// the only ones that take a predictor.
 	columns   uint16
 	predictor uint8
 	colors    uint8
 	bpc       uint8
-	flate     bool
 }
 
 // rowLen returns the byte length of one decoded row.
 func (sc streamCodec) rowLen() int64 {
 	return int64(sc.w[0]) + int64(sc.w[1]) + int64(sc.w[2])
+}
+
+// flate reports whether the chain is exactly FlateDecode.
+func (sc streamCodec) flate() bool {
+	return sc.nfilters == 1 && sc.filters[0] == FilterFlate
+}
+
+// internalErr reports a chain an internal stream may not carry. Cross-reference
+// and object streams are structure, and structure is FlateDecode or nothing.
+func (sc streamCodec) internalErr() error {
+	if sc.nfilters == 0 || sc.flate() {
+		return nil
+	}
+	return ErrUnsupportedFilter
 }
 
 // XrefKind is what a cross-reference record says about an object. The values
@@ -507,6 +478,8 @@ func (pdf *PDF) decodeXrefStream(r io.ReaderAt, off int64, codec *Codec) (prev i
 	}
 	sc, err := codec.readCodec(pdf, r, dictV)
 	if err != nil {
+		return 0, err
+	} else if err = sc.internalErr(); err != nil {
 		return 0, err
 	}
 	// /W is read into sc separately: readCodec serves object streams too, and
