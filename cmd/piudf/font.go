@@ -48,7 +48,7 @@ func (f *font) decode(dst []byte, s []byte) []byte {
 // select one. /Resources is inheritable, so a page without one takes its
 // parent's.
 func pageFonts(c *ctx, page piudf.Value) (map[string]*font, error) {
-	res, err := c.inherited(page, "Resources")
+	res, err := c.pdf.Inherited(c.r, page, "Resources", c.codec)
 	if err != nil || res.IsNull() {
 		return nil, err
 	}
@@ -84,28 +84,6 @@ func pageFonts(c *ctx, page piudf.Value) (map[string]*font, error) {
 		fonts[e.name] = f
 	}
 	return fonts, nil
-}
-
-// inherited reads key from dict, walking /Parent when absent. The page tree
-// lets a node hand /Resources and /MediaBox down to its kids.
-func (c *ctx) inherited(dict piudf.Value, key string) (piudf.Value, error) {
-	for depth := 0; depth <= maxPageDepth; depth++ {
-		v, err := c.codec.DictGet(c.pdf, c.r, dict, key)
-		if err != nil {
-			return v, err
-		}
-		if !v.IsNull() {
-			return c.pdf.Deref(c.r, v, c.codec)
-		}
-		parent, err := c.codec.DictGet(c.pdf, c.r, dict, "Parent")
-		if err != nil || parent.IsNull() {
-			return piudf.Value{Tok: piulex.TokNull}, err
-		}
-		if dict, err = c.pdf.Deref(c.r, parent, c.codec); err != nil {
-			return dict, err
-		}
-	}
-	return piudf.Value{}, fmt.Errorf("/Parent chain deeper than %d", maxPageDepth)
 }
 
 var strm piudf.Stream

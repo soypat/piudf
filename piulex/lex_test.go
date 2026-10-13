@@ -168,3 +168,68 @@ func TestLexerResetDifferentReader(t *testing.T) {
 		t.Fatalf("got %q, want Bravo — window served the previous reader's bytes", lit)
 	}
 }
+
+// TestLexerInlineImageData covers the scan for EI in both its modes: by
+// stated length, which trusts the count, and by search, which must not stop at
+// an EI that binary data happens to contain.
+func TestLexerInlineImageData(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		src    string // Starts at the ID operator.
+		length int64
+		data   string
+		next   string // The token after EI, or "" for end of input.
+		bad    bool
+	}{
+		{name: "plain", src: "ID abc EI Q", length: -1, data: "abc", next: "Q"},
+		{name: "newline", src: "ID\n\x00\xff\nEI\nQ", length: -1, data: "\x00\xff", next: "Q"},
+		{name: "empty", src: "ID EI Q", length: -1, data: "", next: "Q"},
+		{name: "at end", src: "ID xyz EI", length: -1, data: "xyz", next: ""},
+		{name: "delimiter after", src: "ID xyz EI/Im1 Do", length: -1, data: "xyz", next: "/Im1"},
+		// EI inside the data, not preceded by whitespace or followed by a
+		// regular byte, is data.
+		{name: "embedded", src: "ID aEI EIx EI\nQ", length: -1, data: "aEI EIx", next: "Q"},
+		// A stated length reaches past what a search would stop at.
+		{name: "length", src: "ID a EI b\nEI Q", length: 6, data: "a EI b", next: "Q"},
+		// A length landing mid-"EI" leaves no EI after the data.
+		{name: "bad length", src: "ID a EI b EI Q", length: 8, bad: true},
+	} {
+		var l Lexer
+		r := strings.NewReader(tc.src)
+		if err := l.Reset(r, 0, make([]byte, 16)); err != nil {
+			t.Fatal(err)
+		}
+		if tok, _, lit := l.NextToken(); tok != TokIdent || string(lit) != "ID" {
+			t.Fatalf("%s: first token %v %q", tc.name, tok, lit)
+		}
+		start, n, err := l.InlineImageData(tc.length)
+		if tc.bad {
+			if err == nil {
+				t.Errorf("%s: want error", tc.name)
+			}
+			continue
+		} else if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := tc.src[start : int64(start)+n]; got != tc.data {
+			t.Errorf("%s: data %q, want %q", tc.name, got, tc.data)
+		}
+		tok, _, lit := l.NextToken()
+		if tc.next == "" {
+			if tok != TokEOF {
+				t.Errorf("%s: after EI got %v %q, want EOF", tc.name, tok, lit)
+			}
+		} else if string(lit) != strings.TrimPrefix(tc.next, "/") {
+			t.Errorf("%s: after EI got %v %q, want %q", tc.name, tok, lit, tc.next)
+		}
+	}
+	// No EI at all.
+	var l Lexer
+	if err := l.Reset(strings.NewReader("ID abc"), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	l.NextToken()
+	if _, _, err := l.InlineImageData(-1); err == nil {
+		t.Error("unterminated data: want error")
+	}
+}

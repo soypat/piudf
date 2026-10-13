@@ -234,6 +234,13 @@ func showText(dst []byte, content []byte, fonts map[string]*font) ([]byte, error
 				for _, s := range pending {
 					dst = cur.decode(dst, s)
 				}
+			case "ID":
+				// Inline image data is binary and would lex as garbage.
+				// /L could bound it, but its header operands were dropped
+				// as uninteresting, so the data is scanned for EI.
+				if _, _, err := lx.InlineImageData(-1); err != nil {
+					return dst, err
+				}
 			case "ET":
 				// One text object per line: the coarsest split that does not
 				// require the text matrix.

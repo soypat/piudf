@@ -2,9 +2,11 @@ package piudf
 
 import (
 	"bytes"
+	"compress/zlib"
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -927,19 +929,41 @@ func TestStreamPayloadFilters(t *testing.T) {
 // numbered from 1 in order, so a body may reference an earlier one by number.
 func streamDoc(t *testing.T, dicts ...string) (r *bytes.Reader, p *PDF, codec *Codec, ids []ObjectID) {
 	t.Helper()
+	objs := make([]testObj, len(dicts))
+	for i, dict := range dicts {
+		objs[i] = testObj{dict: dict, stream: true}
+	}
+	return objDoc(t, objs...)
+}
+
+// testObj is one object of a document objDoc writes: dictionary body dict,
+// and when stream is set the 3-byte payload "abc" after it.
+type testObj struct {
+	dict   string
+	stream bool
+}
+
+// objDoc writes objs, numbered from 1 in order, and decodes the document.
+func objDoc(t *testing.T, objs ...testObj) (r *bytes.Reader, p *PDF, codec *Codec, ids []ObjectID) {
+	t.Helper()
 	var out bytes.Buffer
 	var e Encoder
 	if err := e.Reset(&out, make([]byte, 64)); err != nil {
 		t.Fatal(err)
 	}
-	ids = make([]ObjectID, len(dicts))
-	for i, dict := range dicts {
+	ids = make([]ObjectID, len(objs))
+	for i, obj := range objs {
 		ids[i] = e.NewID()
 		if ids[i].Num != uint32(i+1) {
 			t.Fatalf("object %d numbered %d", i, ids[i].Num)
 		}
 		e.BeginObject(ids[i])
-		e.Raw([]byte("<< /Length 3 " + dict + " >>"))
+		if !obj.stream {
+			e.Raw([]byte("<< " + obj.dict + " >>"))
+			e.EndObject()
+			continue
+		}
+		e.Raw([]byte("<< /Length 3 " + obj.dict + " >>"))
 		e.BeginStreamPayload()
 		e.Raw([]byte("abc"))
 		e.EndStreamPayload()
@@ -1140,6 +1164,241 @@ func TestFilterString(t *testing.T) {
 		}
 		if tc.f != FilterUnknown && filterByName([]byte(tc.want)) != tc.f {
 			t.Errorf("filterByName(%q) != %v", tc.want, tc.f)
+		}
+	}
+}
+
+// TestAppendPageImages walks the resource shapes discovery must handle:
+// inherited, indirect, nested in forms, repeated and cyclic.
+func TestAppendPageImages(t *testing.T) {
+	const img = "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray"
+	r, p, codec, ids := objDoc(t,
+		// 1: the root, whose resources pages without their own inherit.
+		testObj{dict: "/Type /Pages /Kids [2 0 R 3 0 R 4 0 R 5 0 R] /Count 4 /Resources << /XObject << /Im1 6 0 R >> >>"},
+		testObj{dict: "/Type /Page /Parent 1 0 R"}, // 2: inherits.
+		// 3: own images around a form, which nests another form.
+		testObj{dict: "/Type /Page /Parent 1 0 R /Resources << /XObject << /Im1 6 0 R /Fm1 8 0 R /Im9 7 0 R >> >>"},
+		// 4: indirect resources naming one image twice and a PostScript XObject.
+		testObj{dict: "/Type /Page /Parent 1 0 R /Resources 12 0 R"},
+		// 5: a form that draws itself.
+		testObj{dict: "/Type /Page /Parent 1 0 R /Resources << /XObject << /Loop 14 0 R >> >>"},
+		testObj{dict: img, stream: true}, // 6
+		testObj{dict: img, stream: true}, // 7
+		testObj{dict: "/Subtype /Form /Resources << /XObject << /X 9 0 R /Y 6 0 R /Z 10 0 R >> >>", stream: true}, // 8
+		testObj{dict: img, stream: true}, // 9
+		testObj{dict: "/Subtype /Form /Resources << /XObject << /W 11 0 R >> >>", stream: true}, // 10
+		testObj{dict: img, stream: true},                                                                    // 11
+		testObj{dict: "/XObject << /A 6 0 R /B 6 0 R /P 13 0 R >>"},                                         // 12
+		testObj{dict: "/Subtype /PS", stream: true},                                                         // 13
+		testObj{dict: "/Subtype /Form /Resources << /XObject << /Self 14 0 R /I 7 0 R >> >>", stream: true}, // 14
+	)
+	id := func(n int) ObjectID { return ids[n-1] }
+	for _, tc := range []struct {
+		page int
+		want []ImageRef
+	}{
+		{2, []ImageRef{{ID: id(6)}}},
+		{3, []ImageRef{{ID: id(6)}, {ID: id(7)}, {ID: id(9), Form: id(8)}, {ID: id(11), Form: id(10)}}},
+		{4, []ImageRef{{ID: id(6)}}},
+		{5, []ImageRef{{ID: id(7), Form: id(14)}}},
+	} {
+		page, err := p.Resolve(r, id(tc.page), codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A prefix the caller already holds is kept, and is not what the
+		// page's images are deduplicated against.
+		prefix := ImageRef{ID: id(6)}
+		got, err := p.AppendPageImages([]ImageRef{prefix}, r, page, codec)
+		if err != nil {
+			t.Fatalf("page %d: %v", tc.page, err)
+		}
+		want := append([]ImageRef{prefix}, tc.want...)
+		if !slices.Equal(got, want) {
+			t.Errorf("page %d: got %v, want %v", tc.page, got, want)
+		}
+	}
+
+	page, err := p.Resolve(r, id(3), codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := make([]ImageRef, 0, 64)
+	allocs := testing.AllocsPerRun(20, func() {
+		dst, _ = p.AppendPageImages(dst[:0], r, page, codec)
+	})
+	if allocs > 0 {
+		t.Errorf("AppendPageImages allocates %.1f times with room in dst", allocs)
+	}
+}
+
+// TestAppendPageImagesCorpus lists every page's images in the datasheet and
+// checks discovery against the object sweep: every image found is one
+// ImageInfo reads, and reuse across pages shows as repeated IDs.
+func TestAppendPageImagesCorpus(t *testing.T) {
+	c, size := openCounted(t, fpathMCUSpec)
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.maxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatal(err)
+	}
+	cat := mustCatalog(t, &pdf, c, codec)
+	pages, err := pdf.Deref(c, mustGet(t, &pdf, c, codec, cat.v, "Pages"), codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leaves of the page tree, depth first.
+	var leaves []Value
+	var walk func(node Value, depth int)
+	walk = func(node Value, depth int) {
+		kids, err := codec.DictGet(&pdf, c, node, "Kids")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kids.IsNull() {
+			leaves = append(leaves, node)
+			return
+		}
+		if kids, err = pdf.Deref(c, kids, codec); err != nil {
+			t.Fatal(err)
+		}
+		var refs []ObjectID
+		codec.ArrayForEach(&pdf, c, kids, func(v Value) bool { refs = append(refs, v.ObjectID()); return true })
+		for _, ref := range refs {
+			kid, err := pdf.Resolve(c, ref, codec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			walk(kid, depth+1)
+		}
+	}
+	walk(pages, 0)
+
+	uses := map[ObjectID]int{}
+	var refs []ImageRef
+	for i, page := range leaves {
+		refs, err = pdf.AppendPageImages(refs[:0], c, page, codec)
+		if err != nil {
+			t.Fatalf("page %d: %v", i+1, err)
+		}
+		for _, ref := range refs {
+			uses[ref.ID]++
+		}
+	}
+	shared := 0
+	for id, n := range uses {
+		v, err := pdf.Resolve(c, id, codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pdf.ImageInfo(c, v, codec); err != nil {
+			t.Errorf("image %v: %v", id, err)
+		}
+		if n > 1 {
+			shared++
+		}
+	}
+	t.Logf("%d pages, %d distinct images, %d drawn on more than one page", len(leaves), len(uses), shared)
+	if len(uses) == 0 {
+		t.Error("found no images")
+	}
+}
+
+// TestInlineImage reads inline images out of a content stream: abbreviated and
+// full keys, a filter chain with a predictor, a stated length, a stencil mask,
+// and the offset after each where the content stream resumes.
+func TestInlineImage(t *testing.T) {
+	// 2x2 gray, PNG Up rows: decodes to 10 20 / 11 22.
+	var zbuf bytes.Buffer
+	zw := zlib.NewWriter(&zbuf)
+	zw.Write([]byte{2, 10, 20, 2, 1, 2})
+	zw.Close()
+	flated := zbuf.String()
+
+	content := "q 2 0 0 2 0 0 cm\n" +
+		"BI /W 2 /H 2 /BPC 8 /CS /G /F /Fl /DP << /Predictor 12 /Columns 2 >> ID " + flated + " EI\n" +
+		"Q BI /Width 3 /Height 1 /BitsPerComponent 8 /ColorSpace /RGB /Filter [/AHx] ID 00ff00ff00ff00ff00> EI\n" +
+		"BI /W 1 /H 1 /CS [/I /RGB 1 <000000ffffff>] /BPC 1 /L 4 ID EI\nx EI Q\n" +
+		"BI /W 8 /H 1 /IM true /D [1 0] ID \x5a EI"
+	r := strings.NewReader(content)
+	codec := newCodec(make([]byte, 4096))
+	var p PDF // Inline images never leave the content stream: no document needed.
+
+	type want struct {
+		w, h, bpc, comps int
+		cs               ColorSpace
+		filters          []Filter
+		data             string // Raw payload bytes.
+		next             string // What the content stream says after EI.
+	}
+	wants := []want{
+		{2, 2, 8, 1, ColorSpaceDeviceGray, []Filter{FilterFlate}, flated, "Q"},
+		{3, 1, 8, 3, ColorSpaceDeviceRGB, []Filter{FilterASCIIHex}, "00ff00ff00ff00ff00>", "BI"},
+		{1, 1, 1, 1, ColorSpaceIndexed, nil, "EI\nx", "Q"},
+		{8, 1, 1, 1, ColorSpaceUnknown, nil, "\x5a", ""},
+	}
+	off := int64(0)
+	for i, w := range wants {
+		bi := strings.Index(content[off:], "BI ")
+		if bi < 0 {
+			t.Fatalf("image %d: no BI", i)
+		}
+		info, end, err := p.InlineImage(r, off+int64(bi), codec)
+		if err != nil {
+			t.Fatalf("image %d: %v", i, err)
+		}
+		if info.Width != w.w || info.Height != w.h || info.BitsPerComponent != w.bpc ||
+			info.Components != w.comps || info.ColorSpace != w.cs {
+			t.Errorf("image %d: %dx%d %d bpc %d comps %v, want %dx%d %d %d %v", i,
+				info.Width, info.Height, info.BitsPerComponent, info.Components, info.ColorSpace,
+				w.w, w.h, w.bpc, w.comps, w.cs)
+		}
+		sp := info.Payload
+		if got := content[sp.Offset : sp.Offset+sp.Length]; got != w.data {
+			t.Errorf("image %d: payload %q, want %q", i, got, w.data)
+		}
+		if sp.NumFilters() != len(w.filters) {
+			t.Errorf("image %d: %d filters, want %d", i, sp.NumFilters(), len(w.filters))
+		}
+		for j, f := range w.filters {
+			if sp.Filter(j) != f {
+				t.Errorf("image %d: filter %d = %v, want %v", i, j, sp.Filter(j), f)
+			}
+		}
+		if rest := strings.TrimLeft(content[end:], " \n"); !strings.HasPrefix(rest, w.next) {
+			t.Errorf("image %d: resumes at %q, want %q", i, rest[:min(len(rest), 8)], w.next)
+		}
+		off = end
+	}
+
+	// The first image's samples decode through the content stream reader.
+	info, _, err := p.InlineImage(r, int64(strings.Index(content, "BI")), codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var strm Stream
+	strm.ConfigureDefault()
+	rd, err := p.OpenPayload(r, info.Payload, &strm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte{10, 20, 11, 22}; !bytes.Equal(got, want) {
+		t.Errorf("samples % x, want % x", got, want)
+	}
+
+	for _, bad := range []string{
+		"Q",                        // Not BI.
+		"BI /W 2 /H 2 /BPC 8 abc",  // No ID.
+		"BI /W 2 /BPC 8 ID x EI",   // No height.
+		"BI 7 /H 2 /BPC 8 ID x EI", // Not a key.
+	} {
+		if _, _, err := p.InlineImage(strings.NewReader(bad), 0, codec); err == nil {
+			t.Errorf("%q: want error", bad)
 		}
 	}
 }

@@ -18,10 +18,11 @@ const (
 type Codec struct {
 	npb int
 	pb  [2]Value
-	// pblit preserves the literal of a pushed-back name. The lexer reuses its
-	// literal buffer every token, so a name crossing the pushback queue would
-	// come back empty — which is exactly what a dictionary key does whenever
-	// decodeShallow's reference lookahead reads past an integer value.
+	// pblit preserves the literal of a pushed-back name or operator. The lexer
+	// reuses its literal buffer every token, so a name crossing the pushback
+	// queue would come back empty — which is exactly what a dictionary key does
+	// whenever decodeShallow's reference lookahead reads past an integer value,
+	// and what an inline image's ID does after its header's last integer.
 	pblit    [2][maxNameLen]byte
 	pblitLen [2]uint8
 	stmDepth int
@@ -335,21 +336,38 @@ func (d *Codec) arrayAt(pdf *PDF, r io.ReaderAt, arrV Value, i int) (v Value, n 
 // filter of the chain is named; only the parameters of a Flate or LZW filter
 // are read, since only those describe a predictor this package undoes.
 func (d *Codec) readCodec(pdf *PDF, r io.ReaderAt, dictV Value) (sc streamCodec, err error) {
-	// Defaults mandated by ISO 32000-1 Table 10; predictor 1 means none.
-	sc = streamCodec{predictor: 1, columns: 1, colors: 1, bpc: 8}
 	fv, err := d.DictGet(pdf, r, dictV, "Filter")
 	if err != nil {
 		return sc, err
 	}
-	if fv, err = pdf.Deref(r, fv, d); err != nil {
+	sc, predictorAt, err := d.readFilters(pdf, r, fv)
+	if err != nil || predictorAt < 0 {
+		return sc, err // Or no filter in the chain takes a predictor.
+	}
+	pv, err := d.DictGet(pdf, r, dictV, "DecodeParms")
+	if err != nil {
 		return sc, err
+	}
+	err = d.readPredictor(pdf, r, &sc, pv, predictorAt)
+	return sc, err
+}
+
+// readFilters names the filter chain fv, a /Filter value, and returns the index
+// of its first filter taking a predictor, or -1 when none does. The predictor
+// parameters are left at the defaults ISO 32000-1 Table 10 mandates.
+func (d *Codec) readFilters(pdf *PDF, r io.ReaderAt, fv Value) (sc streamCodec, predictorAt int, err error) {
+	// Predictor 1 means none.
+	sc = streamCodec{predictor: 1, columns: 1, colors: 1, bpc: 8}
+	predictorAt = -1
+	if fv, err = pdf.Deref(r, fv, d); err != nil {
+		return sc, -1, err
 	}
 	// The names are collected before any is read: one Codec has one lexer,
 	// and reading a name inside ArrayForEach would move the scan.
 	var names [maxFilters]Value
 	switch {
 	case fv.IsNull():
-		return sc, nil // Unfiltered: no /DecodeParms to read.
+		return sc, -1, nil // Unfiltered.
 	case fv.Tok == piulex.TokName:
 		names[0] = fv
 		sc.nfilters = 1
@@ -363,49 +381,48 @@ func (d *Codec) readCodec(pdf *PDF, r io.ReaderAt, dictV Value) (sc streamCodec,
 			return true
 		})
 		if err != nil {
-			return sc, err
+			return sc, -1, err
 		} else if d.auxcounter > maxFilters {
-			return sc, errUnsupportedFilter
+			return sc, -1, errUnsupportedFilter
 		}
 		sc.nfilters = uint8(d.auxcounter)
 	default:
-		return sc, errValueMismatch
+		return sc, -1, errValueMismatch
 	}
-	predictorAt := -1
 	for i := range int(sc.nfilters) {
 		if names[i].Tok != piulex.TokName {
-			return sc, errValueMismatch
+			return sc, -1, errValueMismatch
 		}
 		lit, err := d.AppendString(d.keybuf[:0], pdf, r, names[i])
 		if err != nil {
-			return sc, err
+			return sc, -1, err
 		}
 		sc.filters[i] = filterByName(lit)
 		if predictorAt < 0 && sc.filters[i].takesPredictor() {
 			predictorAt = i
 		}
 	}
-	if predictorAt < 0 {
-		return sc, nil // No filter in the chain takes a predictor.
-	}
-	pv, err := d.DictGet(pdf, r, dictV, "DecodeParms")
-	if err != nil {
-		return sc, err
-	}
+	return sc, predictorAt, nil
+}
+
+// readPredictor reads into sc the predictor parameters of filter predictorAt
+// from pv, a /DecodeParms value: one dictionary, or an array of one entry per
+// filter.
+func (d *Codec) readPredictor(pdf *PDF, r io.ReaderAt, sc *streamCodec, pv Value, predictorAt int) (err error) {
 	if pv, err = pdf.Deref(r, pv, d); err != nil {
-		return sc, err
+		return err
 	}
 	if pv.IsArray() {
 		// One entry per filter, null where a filter takes none.
 		if pv, _, err = d.arrayAt(pdf, r, pv, predictorAt); err != nil {
-			return sc, err
+			return err
 		}
 		if pv, err = pdf.Deref(r, pv, d); err != nil {
-			return sc, err
+			return err
 		}
 	}
 	if !pv.IsDict() {
-		return sc, nil // No parameters: defaults stand.
+		return nil // No parameters: defaults stand.
 	}
 	// Read through an array rather than pointers into sc, which would force
 	// the returned struct to escape on every call.
@@ -415,20 +432,20 @@ func (d *Codec) readCodec(pdf *PDF, r io.ReaderAt, dictV Value) (sc streamCodec,
 	for i, key := range keys {
 		v, err := d.DictGet(pdf, r, pv, key)
 		if err != nil {
-			return sc, err
+			return err
 		}
 		if v.IsNull() {
 			continue // Absent: keep the default.
 		}
 		n, ok := v.Int()
 		if !ok || n < 1 || n > lims[i] {
-			return sc, errXrefStreamBad
+			return errBadPredictor
 		}
 		vals[i] = n
 	}
 	sc.predictor, sc.columns = uint8(vals[0]), uint16(vals[1])
 	sc.colors, sc.bpc = uint8(vals[2]), uint8(vals[3])
-	return sc, nil
+	return nil
 }
 
 func (d *Codec) dictGetAccum(pdf *PDF, r io.ReaderAt, dictVal Value, key string, want piulex.Token) Value {
@@ -601,7 +618,7 @@ func (d *Codec) decodeShallow() (_ Value, _ error) {
 // literal-bearing token is a span the Value locates on its own.
 func (d *Codec) unread(tv Value, lit []byte) error {
 	n := 0
-	if tv.Tok == piulex.TokName {
+	if tv.Tok == piulex.TokName || tv.Tok == piulex.TokIdent {
 		if len(lit) > maxNameLen {
 			return errNameTooLong
 		}

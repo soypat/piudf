@@ -53,33 +53,62 @@ func (pdf *PDF) ImageInfo(r io.ReaderAt, v Value, codec *Codec) (ImageInfo, erro
 	return info, nil
 }
 
+// imageKeys are the image dictionary entries ImageInfo reads, as found.
+type imageKeys struct {
+	subtype, width, height, bpc, cs, mask, smask, decode, imask Value
+	// Read for inline images only; a stream's are its own business.
+	filter, parms, length Value
+}
+
+func newImageKeys() imageKeys {
+	null := Value{Tok: piulex.TokNull}
+	return imageKeys{null, null, null, null, null, null, null, null, null, null, null, null}
+}
+
+// set records entry key. An inline image may spell keys in full or by the
+// abbreviations of ISO 32000-1 Table 93; a stream's /F is a file
+// specification and its /L nothing, so those are read only when inline.
+func (k *imageKeys) set(key []byte, v Value, inline bool) {
+	switch b2s(key) {
+	case "Subtype":
+		k.subtype = v
+	case "Width", "W":
+		k.width = v
+	case "Height", "H":
+		k.height = v
+	case "BitsPerComponent", "BPC":
+		k.bpc = v
+	case "ColorSpace", "CS":
+		k.cs = v
+	case "Mask":
+		k.mask = v
+	case "SMask":
+		k.smask = v
+	case "Decode", "D":
+		k.decode = v
+	case "ImageMask", "IM":
+		k.imask = v
+	}
+	if !inline {
+		return
+	}
+	switch b2s(key) {
+	case "Filter", "F":
+		k.filter = v
+	case "DecodeParms", "DP":
+		k.parms = v
+	case "Length", "L":
+		k.length = v
+	}
+}
+
 func (pdf *PDF) imageInfo(r io.ReaderAt, v Value, codec *Codec) (info ImageInfo, err error) {
 	if v.Tok != tokStream {
 		return info, errNotAStream
 	}
-	null := Value{Tok: piulex.TokNull}
-	subtype, width, height, bpc, cs, mask, smask, decode, imask := null, null, null, null, null, null, null, null, null
+	keys := newImageKeys()
 	err = codec.DictForEach(pdf, r, v, func(key []byte, val Value) bool {
-		switch b2s(key) {
-		case "Subtype":
-			subtype = val
-		case "Width":
-			width = val
-		case "Height":
-			height = val
-		case "BitsPerComponent":
-			bpc = val
-		case "ColorSpace":
-			cs = val
-		case "Mask":
-			mask = val
-		case "SMask":
-			smask = val
-		case "Decode":
-			decode = val
-		case "ImageMask":
-			imask = val
-		}
+		keys.set(key, val, false)
 		return true
 	})
 	if err != nil {
@@ -88,15 +117,15 @@ func (pdf *PDF) imageInfo(r io.ReaderAt, v Value, codec *Codec) (info ImageInfo,
 	// Everything the scan found may be indirect, and resolving moves the
 	// lexer, so it waits until the scan is done. Mask and SMask stay as they
 	// are: a stream is always indirect, and the reference is what callers want.
-	for _, p := range [...]*Value{&subtype, &width, &height, &bpc, &cs, &decode, &imask} {
+	for _, p := range [...]*Value{&keys.subtype, &keys.width, &keys.height, &keys.bpc, &keys.cs, &keys.decode, &keys.imask} {
 		if *p, err = pdf.Deref(r, *p, codec); err != nil {
 			return info, err
 		}
 	}
-	if !subtype.IsNull() {
+	if !keys.subtype.IsNull() {
 		// /Subtype is required, but a stream drawn as an image and lacking it
 		// is still one; only a different subtype is wrong.
-		if ok, err := codec.NameIs(pdf, r, subtype, "Image"); err != nil {
+		if ok, err := codec.NameIs(pdf, r, keys.subtype, "Image"); err != nil {
 			return info, err
 		} else if !ok {
 			return info, errBadImage
@@ -105,38 +134,113 @@ func (pdf *PDF) imageInfo(r io.ReaderAt, v Value, codec *Codec) (info ImageInfo,
 	if info.Payload, err = pdf.streamPayload(r, v, codec); err != nil {
 		return info, err
 	}
-	w, okw := width.Int()
-	h, okh := height.Int()
+	err = pdf.fillImageInfo(r, &info, &keys, codec)
+	return info, err
+}
+
+// InlineImage reads the inline image whose BI operator is at offset off of
+// content stream r (ISO 32000-1 8.9.7) and returns it with the offset just past
+// its EI, where the content stream resumes. r is the decoded content stream,
+// not the file: the returned Values and Payload are coordinates in it, and
+// [PDF.OpenPayload] over r decodes the samples.
+//
+// An inline image is not an object and is drawn exactly once, where it is.
+// SMask and Mask do not apply to one; ColorSpace may name a space in the
+// page's /Resources, reported as ColorSpaceUnknown as for an image XObject.
+func (pdf *PDF) InlineImage(r io.ReaderAt, off int64, codec *Codec) (info ImageInfo, end int64, err error) {
+	info, end, err = pdf.inlineImage(r, off, codec)
+	if err != nil {
+		return ImageInfo{}, 0, pdf.setError(codec, err)
+	}
+	return info, end, nil
+}
+
+func (pdf *PDF) inlineImage(r io.ReaderAt, off int64, codec *Codec) (info ImageInfo, end int64, err error) {
+	if err = codec.lexAt(r, off); err != nil {
+		return info, 0, err
+	}
+	if v, lit, err := codec.nextRaw(); err != nil {
+		return info, 0, err
+	} else if v.Tok != piulex.TokIdent || !bequal(lit, "BI") {
+		return info, 0, errBadImage
+	}
+	keys := newImageKeys()
+	for {
+		kv, lit, err := codec.nextRaw()
+		if err != nil {
+			return info, 0, err
+		}
+		if kv.Tok == piulex.TokIdent && bequal(lit, "ID") {
+			break
+		} else if kv.Tok != piulex.TokName || len(lit) > len(codec.keybuf) {
+			return info, 0, errBadImage
+		}
+		// The literal dies at the next token, which the value is.
+		key := codec.keybuf[:copy(codec.keybuf[:], lit)]
+		v, err := codec.decodeShallow()
+		if err != nil {
+			return info, 0, err
+		}
+		keys.set(key, v, true)
+	}
+	length := int64(-1)
+	if n, ok := keys.length.Int(); ok && n >= 0 {
+		length = n
+	}
+	start, n, err := codec.lex.InlineImageData(length)
+	if err != nil {
+		return info, 0, err
+	}
+	end = int64(codec.lex.Pos())
+	sc, predictorAt, err := codec.readFilters(pdf, r, keys.filter)
+	if err != nil {
+		return info, 0, err
+	}
+	if predictorAt >= 0 {
+		if err = codec.readPredictor(pdf, r, &sc, keys.parms, predictorAt); err != nil {
+			return info, 0, err
+		}
+	}
+	info.Payload = StreamPayload{Offset: int64(start), Length: n, codec: sc}
+	keys.mask, keys.smask = Value{Tok: piulex.TokNull}, Value{Tok: piulex.TokNull}
+	err = pdf.fillImageInfo(r, &info, &keys, codec)
+	return info, end, err
+}
+
+// fillImageInfo fills info from keys and info.Payload, which must be set.
+func (pdf *PDF) fillImageInfo(r io.ReaderAt, info *ImageInfo, keys *imageKeys, codec *Codec) (err error) {
+	w, okw := keys.width.Int()
+	h, okh := keys.height.Int()
 	if !okw || !okh || w <= 0 || h <= 0 || w > 1<<24 || h > 1<<24 {
-		return info, errBadImage
+		return errBadImage
 	}
 	info.Width, info.Height = int(w), int(h)
-	info.ImageMask, _ = imask.Bool()
-	info.Mask, info.Decode, info.SMask = mask, decode, smask.ObjectID()
+	info.ImageMask, _ = keys.imask.Bool()
+	info.Mask, info.Decode, info.SMask = keys.mask, keys.decode, keys.smask.ObjectID()
 	jpx := info.Payload.NumFilters() > 0 && info.Payload.Filter(info.Payload.NumFilters()-1) == FilterJPX
 
-	switch n, ok := bpc.Int(); {
+	switch n, ok := keys.bpc.Int(); {
 	case info.ImageMask:
 		// A stencil mask is one bit, whatever it says (ISO 32000-1 Table 89).
 		info.BitsPerComponent, info.Components = 1, 1
-		return info, nil
-	case !ok && jpx && bpc.IsNull():
+		return nil
+	case !ok && jpx && keys.bpc.IsNull():
 		// The codestream says.
 	case ok && (n == 1 || n == 2 || n == 4 || n == 8 || n == 16):
 		info.BitsPerComponent = int(n)
 	default:
-		return info, errBadImage
+		return errBadImage
 	}
 
-	info.ColorSpaceValue = cs
-	info.ColorSpace, info.Components, err = pdf.colorSpace(r, cs, codec)
+	info.ColorSpaceValue = keys.cs
+	info.ColorSpace, info.Components, err = pdf.colorSpace(r, keys.cs, codec)
 	if err != nil {
-		return info, err
+		return err
 	}
 	if info.ColorSpace == ColorSpacePattern {
-		return info, errBadImage // A pattern paints areas; it cannot color samples.
+		return errBadImage // A pattern paints areas; it cannot color samples.
 	}
-	return info, nil
+	return nil
 }
 
 // colorSpace returns the family of color space cs and the samples per pixel it
@@ -227,4 +331,187 @@ func (pdf *PDF) arrayIntAt(r io.ReaderAt, arrV Value, i int, key string, codec *
 		return 0, errBadImage
 	}
 	return int(n), nil
+}
+
+// maxPageTreeDepth bounds a /Parent walk. The page tree is a tree only by
+// convention, and a /Parent pointing back down would otherwise spin forever.
+const maxPageTreeDepth = 32
+
+// maxFormDepth bounds Form XObject nesting during image discovery. A form may
+// draw a form that draws the first, and the depth cap is what ends that.
+const maxFormDepth = 8
+
+// Inherited reads key from page tree node dict, walking /Parent while it is
+// absent: /Resources, /MediaBox, /CropBox and /Rotate are handed down the tree
+// (ISO 32000-1 Table 30). It returns the resolved value, or null when no
+// ancestor sets it.
+func (pdf *PDF) Inherited(r io.ReaderAt, dict Value, key string, codec *Codec) (Value, error) {
+	for range maxPageTreeDepth {
+		v, err := codec.DictGet(pdf, r, dict, key)
+		if err != nil {
+			return v, err
+		} else if !v.IsNull() {
+			return pdf.Deref(r, v, codec)
+		}
+		parent, err := codec.DictGet(pdf, r, dict, "Parent")
+		if err != nil || parent.IsNull() {
+			return Value{Tok: piulex.TokNull}, err
+		}
+		if dict, err = pdf.Deref(r, parent, codec); err != nil {
+			return dict, err
+		}
+	}
+	return Value{}, ErrCodecDepthLimit
+}
+
+// ImageRef is an image XObject a page can draw.
+type ImageRef struct {
+	// ID is the image object. Pages drawing the same image name the same ID,
+	// which is what tells a reused image from a repeated one.
+	ID ObjectID
+	// Form is the Form XObject whose resources name the image, or zero when
+	// the page's own resources do. A form is drawn as a unit, so an image
+	// inside one is drawn wherever the form is.
+	Form ObjectID
+}
+
+// AppendPageImages appends to dst the image XObjects page's resources make
+// available, each once, in the order the resources name them, and follows
+// Form XObjects into theirs. page is a page dictionary; its /Resources may be
+// inherited from an ancestor.
+//
+// Available is not drawn: a resource dictionary may name images the content
+// stream never paints, and producers that share one dictionary among all pages
+// do. Inline images live in the content stream and are not resources, so they
+// are not listed.
+//
+// dst is the only memory used: forms awaiting a visit are held at its tail
+// and removed before return.
+func (pdf *PDF) AppendPageImages(dst []ImageRef, r io.ReaderAt, page Value, codec *Codec) ([]ImageRef, error) {
+	res, err := pdf.Inherited(r, page, "Resources", codec)
+	if err != nil {
+		return dst, pdf.setError(codec, err)
+	}
+	dst, err = pdf.appendResourceImages(dst, len(dst), r, res, ObjectID{}, 0, codec)
+	if err != nil {
+		return dst, pdf.setError(codec, err)
+	}
+	return dst, nil
+}
+
+// appendResourceImages appends the images of resource dictionary res, named
+// by form (zero for a page), to dst, skipping any already in dst[first:].
+func (pdf *PDF) appendResourceImages(dst []ImageRef, first int, r io.ReaderAt, res Value, form ObjectID, depth int, codec *Codec) ([]ImageRef, error) {
+	if res.IsNull() {
+		return dst, nil
+	} else if !res.IsDict() {
+		return dst, errValueMismatch
+	}
+	xobj, err := codec.DictGet(pdf, r, res, "XObject")
+	if err != nil {
+		return dst, err
+	}
+	if xobj, err = pdf.Deref(r, xobj, codec); err != nil || xobj.IsNull() {
+		return dst, err
+	} else if !xobj.IsDict() {
+		return dst, errValueMismatch
+	}
+	// The references are collected before any is resolved: one Codec has one
+	// lexer, and resolving inside DictForEach would move the scan. They are
+	// parked at dst's tail, which is where they are classified too.
+	base := len(dst)
+	err = codec.DictForEach(pdf, r, xobj, func(_ []byte, v Value) bool {
+		if v.Tok == piulex.TokR { // An XObject is a stream, so always indirect.
+			dst = append(dst, ImageRef{ID: v.ObjectID(), Form: form})
+		}
+		return true
+	})
+	if err != nil {
+		return dst[:base], err
+	}
+	// Partition the tail: images to the front, forms to the back, anything
+	// else and repeats dropped.
+	end, nimg := len(dst), base
+	nform := end
+	for i := base; i < nform; {
+		ref := dst[i]
+		v, err := pdf.Resolve(r, ref.ID, codec)
+		if err != nil {
+			return dst[:base], err
+		}
+		kind, err := xobjectKind(pdf, r, v, codec)
+		if err != nil {
+			return dst[:base], err
+		}
+		switch {
+		case kind == xobjImage && !hasImage(dst[first:nimg], ref.ID):
+			dst[nimg] = ref
+			nimg++
+			i++
+		case kind == xobjForm && depth < maxFormDepth:
+			nform--
+			dst[i], dst[nform] = dst[nform], ref
+		default:
+			i++ // Dropped: a PostScript XObject, a repeat, too deep a form.
+		}
+	}
+	// Each form appends its images past end, which leaves the parked forms
+	// in [nform, end) where they are until every one has been visited.
+	for j := nform; j < end; j++ {
+		fid := dst[j].ID
+		fv, err := pdf.Resolve(r, fid, codec)
+		if err != nil {
+			return dst[:base], err
+		}
+		fres, err := codec.DictGet(pdf, r, fv, "Resources")
+		if err != nil {
+			return dst[:base], err
+		}
+		// A form without /Resources draws with its page's, which this walk
+		// has already listed or is listing.
+		if fres, err = pdf.Deref(r, fres, codec); err != nil {
+			return dst[:base], err
+		}
+		if dst, err = pdf.appendResourceImages(dst, first, r, fres, fid, depth+1, codec); err != nil {
+			return dst[:base], err
+		}
+	}
+	// Close the gap the classification and the parked forms left.
+	n := copy(dst[nimg:], dst[end:])
+	return dst[:nimg+n], nil
+}
+
+func hasImage(refs []ImageRef, id ObjectID) bool {
+	for _, ref := range refs {
+		if ref.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+type xobjKind uint8
+
+const (
+	xobjOther xobjKind = iota
+	xobjImage
+	xobjForm
+)
+
+// xobjectKind reads the /Subtype of XObject stream v.
+func xobjectKind(pdf *PDF, r io.ReaderAt, v Value, codec *Codec) (xobjKind, error) {
+	if v.Tok != tokStream {
+		return xobjOther, nil
+	}
+	st, err := codec.DictGet(pdf, r, v, "Subtype")
+	if err != nil || st.Tok != piulex.TokName {
+		return xobjOther, err
+	}
+	if ok, err := codec.NameIs(pdf, r, st, "Image"); ok || err != nil {
+		return xobjImage, err
+	}
+	if ok, err := codec.NameIs(pdf, r, st, "Form"); ok || err != nil {
+		return xobjForm, err
+	}
+	return xobjOther, nil
 }
