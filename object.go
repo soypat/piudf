@@ -207,7 +207,7 @@ func (pdf *PDF) OpenStream(r io.ReaderAt, v Value, s *Stream, codec *Codec) (io.
 
 // OpenPayload returns a reader over the decoded bytes of sp, for callers that
 // already located it. A chain this package cannot decode fails with
-// [ErrUnsupportedFilter]; sp still locates the encoded bytes for a caller that
+// [errUnsupportedFilter]; sp still locates the encoded bytes for a caller that
 // can.
 //
 // The returned reader is the caller's: it owns an inflate window of its own
@@ -220,13 +220,7 @@ func (pdf *PDF) OpenPayload(r io.ReaderAt, sp StreamPayload, s *Stream) (io.Read
 		// Not an internal stream, but the same chains are all that decode.
 		return nil, err
 	}
-	if sp.codec.predictor > 1 {
-		// TODO: predictors. A cross-reference stream needs them and reads rows
-		// rather than bytes, which is xrefRows' business; a content stream
-		// does not.
-		return nil, errTODO
-	}
-	if err := s.Reset(r, sp.Offset, sp.Length, sp.codec.flate()); err != nil {
+	if err := s.resetCodec(r, sp.Offset, sp.Length, &sp.codec); err != nil {
 		return nil, err
 	}
 	return s, nil

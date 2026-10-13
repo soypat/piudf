@@ -187,7 +187,7 @@ func (sc streamCodec) internalErr() error {
 	if sc.nfilters == 0 || sc.flate() {
 		return nil
 	}
-	return ErrUnsupportedFilter
+	return errUnsupportedFilter
 }
 
 // XrefKind is what a cross-reference record says about an object. The values

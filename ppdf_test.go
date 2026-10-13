@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -725,8 +726,7 @@ func dictText(codec *Codec, p *PDF, r io.ReaderAt, dict Value, key string) ([]by
 // above it, which is the transform unfilterPNG undoes. It is written from
 // RFC 2083 section 6 rather than in terms of the code under test — an encoder
 // that called paeth would round-trip a broken paeth happily.
-func pngFilter(cur, prev []byte, ft byte) []byte {
-	const bpp = 1
+func pngFilter(cur, prev []byte, ft byte, bpp int) []byte {
 	out := make([]byte, len(cur))
 	for i := range cur {
 		var a, c byte
@@ -787,8 +787,8 @@ func TestUnfilterPNG(t *testing.T) {
 		// what the cursor hands in and what the encoder must assume.
 		prev := make([]byte, len(predictorRows[0]))
 		for i, want := range predictorRows {
-			cur := pngFilter(want, prev, ft)
-			if err := unfilterPNG(cur, prev, ft); err != nil {
+			cur := pngFilter(want, prev, ft, 1)
+			if err := unfilterPNG(cur, prev, ft, 1); err != nil {
 				t.Fatalf("filter %d row %d: %v", ft, i, err)
 			}
 			if !bytes.Equal(cur, want) {
@@ -808,8 +808,8 @@ func TestUnfilterPNGMixedFilters(t *testing.T) {
 	prev := make([]byte, len(predictorRows[0]))
 	for i, want := range predictorRows {
 		ft := byte(i % 5) // A different filter every row.
-		cur := pngFilter(want, prev, ft)
-		if err := unfilterPNG(cur, prev, ft); err != nil {
+		cur := pngFilter(want, prev, ft, 1)
+		if err := unfilterPNG(cur, prev, ft, 1); err != nil {
 			t.Fatalf("row %d (filter %d): %v", i, ft, err)
 		}
 		if !bytes.Equal(cur, want) {
@@ -854,8 +854,8 @@ func TestPaeth(t *testing.T) {
 // comes from the file, so it is input, not a constant.
 func TestUnfilterPNGBadFilter(t *testing.T) {
 	cur, prev := []byte{1, 2, 3}, []byte{0, 0, 0}
-	if err := unfilterPNG(cur, prev, 5); err != errXrefStreamBad {
-		t.Errorf("filter 5 = %v, want errXrefStreamBad", err)
+	if err := unfilterPNG(cur, prev, 5, 1); err != errBadPredictor {
+		t.Errorf("filter 5 = %v, want errBadPredictor", err)
 	}
 }
 
@@ -882,35 +882,11 @@ func TestStreamPayloadFilters(t *testing.T) {
 		// Parameters on a filter that takes no predictor are not read as one.
 		{dict: "/Filter /DCTDecode /DecodeParms << /ColorTransform 0 >>", want: []Filter{FilterDCT}},
 	}
-	var out bytes.Buffer
-	var e Encoder
-	if err := e.Reset(&out, make([]byte, 64)); err != nil {
-		t.Fatal(err)
-	}
-	ids := make([]ObjectID, len(cases))
+	dicts := make([]string, len(cases))
 	for i, tc := range cases {
-		ids[i] = e.NewID()
-		e.BeginObject(ids[i])
-		e.Raw([]byte("<< /Length 3 " + tc.dict + " >>"))
-		e.BeginStreamPayload()
-		e.Raw([]byte("abc"))
-		e.EndStreamPayload()
-		e.EndObject()
+		dicts[i] = tc.dict
 	}
-	cat := e.NewID()
-	e.BeginObject(cat)
-	e.Raw([]byte("<< /Type /Catalog >>"))
-	e.EndObject()
-	if err := e.Close(cat, ObjectID{}); err != nil {
-		t.Fatal(err)
-	}
-
-	r := bytes.NewReader(out.Bytes())
-	codec := newCodec(make([]byte, 4096))
-	var p PDF
-	if err := p.Decode(r, r.Size(), codec); err != nil {
-		t.Fatal(err)
-	}
+	r, p, codec, ids := streamDoc(t, dicts...)
 	var strm Stream
 	strm.ConfigureDefault()
 	for i, tc := range cases {
@@ -940,9 +916,213 @@ func TestStreamPayloadFilters(t *testing.T) {
 		// "abc" is not a zlib stream, so a Flate payload may fail later; what
 		// is pinned here is only whether the chain is refused up front.
 		_, err = p.OpenPayload(r, sp, &strm)
-		if refused := errors.Is(err, ErrUnsupportedFilter); refused == tc.decodes {
+		if refused := errors.Is(err, errUnsupportedFilter); refused == tc.decodes {
 			t.Errorf("%q: OpenPayload err = %v, decodable = %v", tc.dict, err, tc.decodes)
 		}
+	}
+}
+
+// streamDoc writes a document holding one stream object per dictionary body
+// in dicts, each with the 3-byte payload "abc", and decodes it. Objects are
+// numbered from 1 in order, so a body may reference an earlier one by number.
+func streamDoc(t *testing.T, dicts ...string) (r *bytes.Reader, p *PDF, codec *Codec, ids []ObjectID) {
+	t.Helper()
+	var out bytes.Buffer
+	var e Encoder
+	if err := e.Reset(&out, make([]byte, 64)); err != nil {
+		t.Fatal(err)
+	}
+	ids = make([]ObjectID, len(dicts))
+	for i, dict := range dicts {
+		ids[i] = e.NewID()
+		if ids[i].Num != uint32(i+1) {
+			t.Fatalf("object %d numbered %d", i, ids[i].Num)
+		}
+		e.BeginObject(ids[i])
+		e.Raw([]byte("<< /Length 3 " + dict + " >>"))
+		e.BeginStreamPayload()
+		e.Raw([]byte("abc"))
+		e.EndStreamPayload()
+		e.EndObject()
+	}
+	cat := e.NewID()
+	e.BeginObject(cat)
+	e.Raw([]byte("<< /Type /Catalog >>"))
+	e.EndObject()
+	if err := e.Close(cat, ObjectID{}); err != nil {
+		t.Fatal(err)
+	}
+	r = bytes.NewReader(out.Bytes())
+	codec = newCodec(make([]byte, 4096))
+	p = new(PDF)
+	if err := p.Decode(r, r.Size(), codec); err != nil {
+		t.Fatal(err)
+	}
+	return r, p, codec, ids
+}
+
+// TestImageInfo covers the color space shapes an image dictionary takes and
+// the entries whose absence or value makes it no image at all.
+func TestImageInfo(t *testing.T) {
+	const img = "/Type /XObject /Subtype /Image /Width 4 /Height 3 "
+	cases := []struct {
+		dict  string
+		cs    ColorSpace
+		comps int
+		bpc   int
+		err   error
+	}{
+		// Object 1, referenced by the ICCBased cases below.
+		{dict: "/N 3", err: errBadImage},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace /DeviceRGB", cs: ColorSpaceDeviceRGB, comps: 3, bpc: 8},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /DCTDecode", cs: ColorSpaceDeviceGray, comps: 1, bpc: 8},
+		{dict: img + "/BitsPerComponent 16 /ColorSpace /DeviceCMYK", cs: ColorSpaceDeviceCMYK, comps: 4, bpc: 16},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/ICCBased 1 0 R]", cs: ColorSpaceICCBased, comps: 3, bpc: 8},
+		{dict: img + "/BitsPerComponent 4 /ColorSpace [/Indexed /DeviceRGB 15 <00ff00>]", cs: ColorSpaceIndexed, comps: 1, bpc: 4},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/Indexed [/ICCBased 1 0 R] 1 (abcdef)]", cs: ColorSpaceIndexed, comps: 1, bpc: 8},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/DeviceN [/Cyan /Black /Spot] /DeviceCMYK 5 0 R]", cs: ColorSpaceDeviceN, comps: 3, bpc: 8},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/Separation /Gold /DeviceCMYK 5 0 R]", cs: ColorSpaceSeparation, comps: 1, bpc: 8},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/CalRGB << /WhitePoint [1 1 1] >>]", cs: ColorSpaceCalRGB, comps: 3, bpc: 8},
+		// A name from the page's /Resources: known only to the page.
+		{dict: img + "/BitsPerComponent 8 /ColorSpace /CS0", cs: ColorSpaceUnknown, comps: 0, bpc: 8},
+		// A stencil mask is one bit whatever it claims, and has no color.
+		{dict: img + "/ImageMask true /BitsPerComponent 8", comps: 1, bpc: 1},
+		// JPX may defer both to its codestream.
+		{dict: img + "/Filter /JPXDecode", bpc: 0},
+		{dict: img + "/ColorSpace /DeviceRGB /Filter /JPXDecode", cs: ColorSpaceDeviceRGB, comps: 3},
+		{dict: img + "/ColorSpace /DeviceRGB", err: errBadImage}, // No /BitsPerComponent.
+		{dict: img + "/BitsPerComponent 3 /ColorSpace /DeviceRGB", err: errBadImage},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace /Pattern", err: errBadImage},
+		{dict: img + "/BitsPerComponent 8 /ColorSpace [/ICCBased 2 0 R]", err: errBadImage}, // Profile lacks /N.
+		{dict: "/Subtype /Form /Width 4 /Height 3 /BitsPerComponent 8", err: errBadImage},
+		{dict: "/Subtype /Image /Width 0 /Height 3 /BitsPerComponent 8", err: errBadImage},
+	}
+	dicts := make([]string, len(cases))
+	for i, tc := range cases {
+		dicts[i] = tc.dict
+	}
+	r, p, codec, ids := streamDoc(t, dicts...)
+	for i, tc := range cases {
+		v, err := p.Resolve(r, ids[i], codec)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.dict, err)
+		}
+		info, err := p.ImageInfo(r, v, codec)
+		if tc.err != nil {
+			if !errors.Is(err, tc.err) {
+				t.Errorf("%q: err = %v, want %v", tc.dict, err, tc.err)
+			}
+			continue
+		} else if err != nil {
+			t.Errorf("%q: %v", tc.dict, err)
+			continue
+		}
+		if info.Width != 4 || info.Height != 3 {
+			t.Errorf("%q: size %dx%d, want 4x3", tc.dict, info.Width, info.Height)
+		}
+		if info.ColorSpace != tc.cs || info.Components != tc.comps || info.BitsPerComponent != tc.bpc {
+			t.Errorf("%q: got %v/%d comps/%d bpc, want %v/%d/%d", tc.dict,
+				info.ColorSpace, info.Components, info.BitsPerComponent, tc.cs, tc.comps, tc.bpc)
+		}
+		if info.Payload.Length != 3 {
+			t.Errorf("%q: payload length %d, want 3", tc.dict, info.Payload.Length)
+		}
+	}
+}
+
+// TestImageInfoMasks pins the mask entries coming back as the references and
+// arrays they are, not resolved.
+func TestImageInfoMasks(t *testing.T) {
+	const img = "/Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray "
+	r, p, codec, ids := streamDoc(t,
+		img+"/SMask 2 0 R /Decode [1 0]",
+		img,
+		img+"/Mask [0 10]",
+	)
+	v, err := p.Resolve(r, ids[0], codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := p.ImageInfo(r, v, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.SMask != ids[1] {
+		t.Errorf("SMask = %v, want %v", info.SMask, ids[1])
+	}
+	if !info.Decode.IsArray() || !info.Mask.IsNull() {
+		t.Errorf("Decode %v, Mask %v: want array, null", info.Decode.Tok, info.Mask.Tok)
+	}
+	if v, err = p.Resolve(r, ids[2], codec); err != nil {
+		t.Fatal(err)
+	}
+	if info, err = p.ImageInfo(r, v, codec); err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mask.IsArray() || !info.SMask.IsZero() {
+		t.Errorf("Mask %v, SMask %v: want array, zero", info.Mask.Tok, info.SMask)
+	}
+}
+
+// TestImageInfoCorpus reads every image XObject of the corpus: real files
+// write the shapes TestImageInfo spells out by hand, plus whatever it missed.
+func TestImageInfoCorpus(t *testing.T) {
+	for _, fpath := range []string{fpathBook, fpathMCUSpec, "testdata/basis-of-embedded.pdf"} {
+		c, size := openCounted(t, fpath)
+		var pdf PDF
+		codec := newCodec(make([]byte, 4096))
+		codec.maxLazySections = 4096
+		if err := pdf.Decode(c, size, codec); err != nil {
+			t.Fatalf("%s: Decode: %v", fpath, err)
+		}
+		var last uint32
+		for _, s := range pdf.sections {
+			last = max(last, s.firstObj+s.count)
+		}
+		var images, payloads [16]int // By ColorSpace, by last Filter.
+		n := 0
+		for num := uint32(1); num < last; num++ {
+			e, err := pdf.Lookup(c, num, codec)
+			if err != nil || e.Kind == XrefFree {
+				continue
+			}
+			v, err := pdf.Resolve(c, e.ID, codec)
+			if err != nil || v.Tok != tokStream {
+				continue
+			}
+			st, err := codec.DictGet(&pdf, c, v, "Subtype")
+			if err != nil {
+				t.Fatalf("%s: object %d: %v", fpath, num, err)
+			}
+			if ok, _ := codec.NameIs(&pdf, c, st, "Image"); !ok {
+				continue
+			}
+			info, err := pdf.ImageInfo(c, v, codec)
+			if err != nil {
+				t.Errorf("%s: object %d: %v", fpath, num, err)
+				continue
+			}
+			n++
+			images[info.ColorSpace]++
+			if k := info.Payload.NumFilters(); k > 0 {
+				payloads[info.Payload.Filter(k-1)]++
+			}
+			if info.Components == 0 && info.ColorSpace != ColorSpaceUnknown {
+				t.Errorf("%s: object %d: %v with no components", fpath, num, info.ColorSpace)
+			}
+		}
+		var summary []string
+		for cs, k := range images {
+			if k > 0 {
+				summary = append(summary, ColorSpace(cs).String()+"="+strconv.Itoa(k))
+			}
+		}
+		for f, k := range payloads {
+			if k > 0 {
+				summary = append(summary, Filter(f).String()+"="+strconv.Itoa(k))
+			}
+		}
+		t.Logf("%s: %d images: %s", fpath, n, strings.Join(summary, " "))
 	}
 }
 

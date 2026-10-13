@@ -365,7 +365,7 @@ func (d *Codec) readCodec(pdf *PDF, r io.ReaderAt, dictV Value) (sc streamCodec,
 		if err != nil {
 			return sc, err
 		} else if d.auxcounter > maxFilters {
-			return sc, ErrUnsupportedFilter
+			return sc, errUnsupportedFilter
 		}
 		sc.nfilters = uint8(d.auxcounter)
 	default:
