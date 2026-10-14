@@ -28,6 +28,8 @@ const (
 	errUnsupportedFilter             // stream filter not supported
 	errBadPredictor                  // bad /Predictor or predictor row
 	errBadImage                      // image dictionary missing or bad entry
+	ErrUnsupportedImage              // image encoding or color space not supported
+	errImageTooLarge                 // image exceeds ImageDecoder.MaxPixels
 	// Lexer errors below.
 	_errLexErrorsStart              //
 	errXrefStreamBad                // xref stream generic error
