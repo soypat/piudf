@@ -3,6 +3,7 @@ package piupage
 import (
 	"bytes"
 	"image/color"
+	"reflect"
 
 	"github.com/soypat/lefevre/sfnt"
 	"github.com/soypat/piudf/internal"
@@ -303,8 +304,18 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 
 // Image draws img stretched over the rectangle at (x,y) of size w×h,
 // registering it in the page's resources. A nil img is ignored.
+//
+// Images are told apart by ==, which is what writes one drawn many times only
+// once: the same image must be the same pointer, and a different picture a
+// different one. An img that == cannot compare fails the canvas. Its pixels
+// are read when the document is written, not here, so img must not change
+// until then: a buffer redrawn for every page shows its last drawing on all.
 func (c *Canvas) Image(x, y, w, h float64, img Image) {
 	if img == nil {
+		return
+	} else if !isComparable(img) {
+		// == on it would panic.
+		c.emit.Fail(errImageNotComparable)
 		return
 	}
 	num := c.ensureImage(img)
@@ -315,6 +326,17 @@ func (c *Canvas) Image(x, y, w, h float64, img Image) {
 	c.emit.NameNum("Im", int64(num))
 	c.emit.Ident("Do")
 	c.Restore(s)
+}
+
+// isComparable reports whether == on img cannot panic. A pointer, which every
+// image/... type is, is decided by its type without allocating; a value type
+// is inspected through reflect.Value, since an interface field makes it a
+// question of what the field holds.
+func isComparable(img Image) bool {
+	if reflect.TypeOf(img).Kind() == reflect.Pointer {
+		return true
+	}
+	return reflect.ValueOf(img).Comparable()
 }
 
 // ensureImage registers img and returns its resource number (the N of /ImN).

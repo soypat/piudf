@@ -7,10 +7,12 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/soypat/piudf"
+	"github.com/soypat/piudf/piulex"
 )
 
 // opaqueless hides an image's Opaque method and concrete type, so it takes the
@@ -164,6 +166,68 @@ func TestImageEncoderRoundTrip(t *testing.T) {
 	sameImage(t, "*JPEG", readImage(t, data, ids[len(imgs)]), want, 0)
 }
 
+// TestImageEncoderAdobeCMYK round-trips an Adobe CMYK JPEG file, whose samples
+// are stored inverted. A JPEG reader undoes that and a PDF reader does not, so
+// the file must be written with a /Decode for the PDF to show what the file
+// shows. image/jpeg cannot encode CMYK, so the file comes from the corpus.
+func TestImageEncoderAdobeCMYK(t *testing.T) {
+	jpg := corpusJPEG(t, "../testdata/basis-of-embedded.pdf")
+	var j JPEG
+	if err := j.Reset(jpg); err != nil {
+		t.Fatal(err)
+	}
+	if j.comps != 4 || !j.adobe {
+		t.Fatalf("corpus JPEG has %d components, Adobe %v: want Adobe CMYK", j.comps, j.adobe)
+	}
+	var ie ImageEncoder
+	data, ids := writeDoc(t, &ie, []Image{&j})
+	if !bytes.Contains(data, []byte("/Decode")) {
+		t.Error("Adobe CMYK JPEG written without an inverting /Decode")
+	}
+	want, err := jpeg.Decode(bytes.NewReader(jpg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameImage(t, "Adobe CMYK", readImage(t, data, ids[0]), want, 0)
+}
+
+// corpusJPEG returns the first DCTDecode image payload of the PDF at path.
+func corpusJPEG(t *testing.T, path string) []byte {
+	t.Helper()
+	f, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(f)
+	var codec piudf.Codec
+	if err := codec.Configure(piudf.DecoderConfig{Buffer: make([]byte, 4096), MaxLazySections: 64, MaxDepth: 32}); err != nil {
+		t.Fatal(err)
+	}
+	var pdf piudf.PDF
+	if err := pdf.Decode(r, r.Size(), &codec); err != nil {
+		t.Fatal(err)
+	}
+	sizeV, err := codec.DictGet(&pdf, r, pdf.Trailer(), "Size")
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, _ := sizeV.Int()
+	for num := uint32(1); num < uint32(size); num++ {
+		v, err := pdf.Resolve(r, piudf.ObjectID{Num: num}, &codec)
+		if err != nil || v.Tok != piulex.TokStream {
+			continue
+		}
+		info, err := pdf.ImageInfo(r, v, &codec)
+		if err != nil || info.Payload.NumFilters() != 1 || info.Payload.Filter(0) != piudf.FilterDCT {
+			continue
+		}
+		sp := info.Payload
+		return f[sp.Offset : sp.Offset+sp.Length]
+	}
+	t.Fatalf("%s holds no DCTDecode image", path)
+	return nil
+}
+
 // TestImageEncoderAllocs pins writing costing nothing once warm, for every
 // image/... type and *JPEG: the compressor is reset, not remade, and samples
 // are staged through a fixed buffer. The generic At path allocates and is left
@@ -243,6 +307,37 @@ func TestCanvasImage(t *testing.T) {
 	})
 	if allocs > 0 {
 		t.Errorf("Canvas.Image allocates %.1f times once warm", allocs)
+	}
+}
+
+// sliceImage is an image.Image == cannot compare: comparing two panics.
+type sliceImage struct{ pix []byte }
+
+func (sliceImage) Bounds() image.Rectangle { return image.Rect(0, 0, 1, 1) }
+func (sliceImage) ColorModel() color.Model { return color.GrayModel }
+func (sliceImage) At(x, y int) color.Color { return color.Gray{} }
+
+// TestCanvasImageNotComparable pins an image == cannot compare failing the
+// canvas instead of panicking when it meets the images drawn before it.
+func TestCanvasImageNotComparable(t *testing.T) {
+	for _, img := range []Image{
+		sliceImage{},
+		// Comparable by type, not by the value its interface field holds.
+		opaqueless{Image: sliceImage{}},
+	} {
+		var c Canvas
+		if err := c.Reset(make([]byte, 512)); err != nil {
+			t.Fatal(err)
+		}
+		c.Image(0, 0, 1, 1, image.NewGray(image.Rect(0, 0, 1, 1)))
+		c.Image(0, 0, 1, 1, img)
+		c.Image(0, 0, 1, 1, img)
+		if err := c.Err(); err != errImageNotComparable {
+			t.Errorf("%T: Err() = %v, want %v", img, err, errImageNotComparable)
+		}
+		if n := len(c.Images()); n != 1 {
+			t.Errorf("%T: %d images registered, want 1", img, n)
+		}
 	}
 }
 

@@ -183,11 +183,29 @@ func (pdf *PDF) inlineImage(r io.ReaderAt, off int64, codec *Codec) (info ImageI
 		}
 		keys.set(key, v, true)
 	}
+	// The lexer stands on the whitespace after ID. Working out the data's
+	// length may lex elsewhere, so this is where it comes back to.
+	idEnd := int64(codec.lex.Pos())
 	length := int64(-1)
 	if n, ok := keys.length.Int(); ok && n >= 0 {
 		length = n
+	} else if keys.filter.IsNull() {
+		// Unfiltered samples have a length the header fixes, which beats
+		// searching binary data for an EI it may hold itself.
+		length = pdf.inlineDataLen(r, &keys, codec)
+		if err = codec.lexAt(r, idEnd); err != nil {
+			return info, 0, err
+		}
 	}
 	start, n, err := codec.lex.InlineImageData(length)
+	if err != nil && length >= 0 {
+		// A length that does not end at EI was miscounted by the producer;
+		// the search may yet find the end.
+		if err = codec.lexAt(r, idEnd); err != nil {
+			return info, 0, err
+		}
+		start, n, err = codec.lex.InlineImageData(-1)
+	}
 	if err != nil {
 		return info, 0, err
 	}
@@ -205,6 +223,31 @@ func (pdf *PDF) inlineImage(r io.ReaderAt, off int64, codec *Codec) (info ImageI
 	keys.mask, keys.smask = Value{Tok: piulex.TokNull}, Value{Tok: piulex.TokNull}
 	err = pdf.fillImageInfo(r, &info, &keys, codec)
 	return info, end, err
+}
+
+// inlineDataLen returns the byte length of an unfiltered inline image's
+// samples, Height rows of ceil(Width*components*BitsPerComponent/8) bytes, or
+// -1 when the header does not tell it: a color space named by the page's
+// resources, or a header fillImageInfo will refuse anyway. It lexes.
+func (pdf *PDF) inlineDataLen(r io.ReaderAt, keys *imageKeys, codec *Codec) int64 {
+	w, okw := keys.width.Int()
+	h, okh := keys.height.Int()
+	if !okw || !okh || w <= 0 || h <= 0 || w > 1<<24 || h > 1<<24 {
+		return -1
+	}
+	bpc, comps := int64(1), int64(1) // A stencil mask's.
+	if im, _ := keys.imask.Bool(); !im {
+		var ok bool
+		if bpc, ok = keys.bpc.Int(); !ok || bpc < 1 || bpc > 16 {
+			return -1
+		}
+		_, n, err := pdf.colorSpace(r, keys.cs, codec)
+		if err != nil || n == 0 {
+			return -1
+		}
+		comps = int64(n)
+	}
+	return h * ((w*comps*bpc + 7) / 8)
 }
 
 // fillImageInfo fills info from keys and info.Payload, which must be set.
@@ -341,6 +384,12 @@ const maxPageTreeDepth = 32
 // draw a form that draws the first, and the depth cap is what ends that.
 const maxFormDepth = 8
 
+// maxFormVisits bounds the Form XObjects one image discovery visits in all.
+// Depth alone does not bound the work: forms that each name every other form
+// form a graph whose walk is exponential in its depth, ten of them making 10^8
+// visits, while a visited set would cost memory a walk out of dst has not got.
+const maxFormVisits = 64
+
 // Inherited reads key from page tree node dict, walking /Parent while it is
 // absent: /Resources, /MediaBox, /CropBox and /Rotate are handed down the tree
 // (ISO 32000-1 Table 30). It returns the resolved value, or null when no
@@ -386,13 +435,16 @@ type ImageRef struct {
 // are not listed.
 //
 // dst is the only memory used: forms awaiting a visit are held at its tail
-// and removed before return.
+// and removed before return. Forms nested deeper than 8, or past the 64th
+// visited, are not followed: a hostile file's form graph is otherwise a walk
+// exponential in its depth.
 func (pdf *PDF) AppendPageImages(dst []ImageRef, r io.ReaderAt, page Value, codec *Codec) ([]ImageRef, error) {
 	res, err := pdf.Inherited(r, page, "Resources", codec)
 	if err != nil {
 		return dst, pdf.setError(codec, err)
 	}
-	dst, err = pdf.appendResourceImages(dst, len(dst), r, res, ObjectID{}, 0, codec)
+	visits := maxFormVisits
+	dst, err = pdf.appendResourceImages(dst, len(dst), r, res, ObjectID{}, 0, &visits, codec)
 	if err != nil {
 		return dst, pdf.setError(codec, err)
 	}
@@ -401,7 +453,8 @@ func (pdf *PDF) AppendPageImages(dst []ImageRef, r io.ReaderAt, page Value, code
 
 // appendResourceImages appends the images of resource dictionary res, named
 // by form (zero for a page), to dst, skipping any already in dst[first:].
-func (pdf *PDF) appendResourceImages(dst []ImageRef, first int, r io.ReaderAt, res Value, form ObjectID, depth int, codec *Codec) ([]ImageRef, error) {
+// visits is the forms the walk may still follow.
+func (pdf *PDF) appendResourceImages(dst []ImageRef, first int, r io.ReaderAt, res Value, form ObjectID, depth int, visits *int, codec *Codec) ([]ImageRef, error) {
 	if res.IsNull() {
 		return dst, nil
 	} else if !res.IsDict() {
@@ -457,7 +510,8 @@ func (pdf *PDF) appendResourceImages(dst []ImageRef, first int, r io.ReaderAt, r
 	}
 	// Each form appends its images past end, which leaves the parked forms
 	// in [nform, end) where they are until every one has been visited.
-	for j := nform; j < end; j++ {
+	for j := nform; j < end && *visits > 0; j++ {
+		*visits--
 		fid := dst[j].ID
 		fv, err := pdf.Resolve(r, fid, codec)
 		if err != nil {
@@ -472,7 +526,7 @@ func (pdf *PDF) appendResourceImages(dst []ImageRef, first int, r io.ReaderAt, r
 		if fres, err = pdf.Deref(r, fres, codec); err != nil {
 			return dst[:base], err
 		}
-		if dst, err = pdf.appendResourceImages(dst, first, r, fres, fid, depth+1, codec); err != nil {
+		if dst, err = pdf.appendResourceImages(dst, first, r, fres, fid, depth+1, visits, codec); err != nil {
 			return dst[:base], err
 		}
 	}

@@ -6,6 +6,9 @@ package main
 
 import (
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
 	"os"
 	"time"
 
@@ -51,14 +54,15 @@ func main() {
 	var bld doc.Builder
 	var story []doc.Drawer
 
-	// Header: title + invoice meta.
+	// Header: logo + title + invoice meta.
 	var metaStyle doc.TableStyle
 	metaStyle.All().Valign(doc.Top)
-	metaStyle.Range(1, 0, 1, 0).Align(doc.Right)
+	metaStyle.Range(2, 0, 2, 0).Align(doc.Right)
 	story = append(story, &doc.Table{
-		ColWidths: []float64{118 * mm, 48 * mm},
+		ColWidths: []float64{20 * mm, 98 * mm, 48 * mm},
 		Style:     metaStyle,
 		Rows: [][]doc.Cell{{
+			{Drawer: &doc.Image{Img: logo(), Width: 16 * mm}},
 			{Drawer: bld.Text("COMMERCIAL INVOICE", h1)},
 			{Drawer: bld.P(grey("INVOICE No.")+`<br/><b>0001-2026</b><br/>`+
 				grey("DATE")+`<br/><b>July 7, 2026</b>`, base)},
@@ -162,6 +166,42 @@ func main() {
 	pages := make([]canvas.Canvas, maxPages)
 	must(d.Build(f, pages, story, make([]byte, 4096), make([]byte, maxPages*4096)))
 	fmt.Println("wrote", out, "in", time.Since(start).Round(time.Microsecond))
+}
+
+// logo draws the seller's mark with the standard library: a dark disc with two
+// light bars across it, on a transparent background that the PDF keeps as a
+// soft mask.
+func logo() *image.NRGBA {
+	const size = 256
+	m := image.NewNRGBA(image.Rect(0, 0, size, size))
+	disc := circle{center: image.Pt(size/2, size/2), r: size/2 - 4}
+	draw.DrawMask(m, m.Bounds(), image.NewUniform(DARK), image.Point{}, disc, image.Point{}, draw.Over)
+	bar := image.NewUniform(LIGHT)
+	for _, y := range []int{size * 3 / 8, size * 9 / 16} {
+		r := image.Rect(size/4, y, size*3/4, y+size/10)
+		draw.DrawMask(m, r, bar, image.Point{}, disc, r.Min, draw.Over)
+	}
+	return m
+}
+
+// circle is a mask opaque inside a disc, the one shape image/draw lacks.
+type circle struct {
+	center image.Point
+	r      int
+}
+
+func (c circle) ColorModel() color.Model { return color.AlphaModel }
+
+func (c circle) Bounds() image.Rectangle {
+	return image.Rect(c.center.X-c.r, c.center.Y-c.r, c.center.X+c.r, c.center.Y+c.r)
+}
+
+func (c circle) At(x, y int) color.Color {
+	dx, dy := float64(x-c.center.X)+0.5, float64(y-c.center.Y)+0.5
+	if dx*dx+dy*dy < float64(c.r*c.r) {
+		return color.Opaque
+	}
+	return color.Transparent
 }
 
 func must(err error) {

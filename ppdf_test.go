@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -1232,6 +1233,41 @@ func TestAppendPageImages(t *testing.T) {
 	}
 }
 
+// TestAppendPageImagesFormGraph pins the walk's cost on a hostile form graph:
+// ten forms that each name all ten are 10^8 visits to the depth cap, so
+// without the visit budget this test does not finish.
+func TestAppendPageImagesFormGraph(t *testing.T) {
+	const nforms = 10
+	var forms strings.Builder
+	for k := range nforms {
+		fmt.Fprintf(&forms, "/F%d %d 0 R ", k, k+2) // Forms are objects 2…11.
+	}
+	objs := []testObj{{dict: "/Type /Page /Resources << /XObject << " + forms.String() + "/Own 13 0 R >> >>"}}
+	for range nforms {
+		objs = append(objs, testObj{dict: "/Subtype /Form /Resources << /XObject << " + forms.String() + "/I 12 0 R >> >>", stream: true})
+	}
+	const img = "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray"
+	objs = append(objs, testObj{dict: img, stream: true}, testObj{dict: img, stream: true}) // 12, 13.
+	r, p, codec, ids := objDoc(t, objs...)
+
+	page, err := p.Resolve(r, ids[0], codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.AppendPageImages(nil, r, page, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotIDs []ObjectID
+	for _, ref := range got {
+		gotIDs = append(gotIDs, ref.ID)
+	}
+	slices.SortFunc(gotIDs, func(a, b ObjectID) int { return int(a.Num) - int(b.Num) })
+	if want := []ObjectID{ids[11], ids[12]}; !slices.Equal(gotIDs, want) {
+		t.Errorf("images %v, want %v, each once", gotIDs, want)
+	}
+}
+
 // TestAppendPageImagesCorpus lists every page's images in the datasheet and
 // checks discovery against the object sweep: every image found is one
 // ImageInfo reads, and reuse across pages shows as repeated IDs.
@@ -1399,6 +1435,41 @@ func TestInlineImage(t *testing.T) {
 	} {
 		if _, _, err := p.InlineImage(strings.NewReader(bad), 0, codec); err == nil {
 			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
+// TestInlineImageLength pins the end of unfiltered inline data coming from
+// the header, not from a search: samples may hold "EI" between whitespace,
+// which a search takes for the end, misparsing the rest of the page.
+func TestInlineImageLength(t *testing.T) {
+	codec := newCodec(make([]byte, 4096))
+	var p PDF
+	for _, tc := range []struct {
+		content, data string
+	}{
+		// 4x1 gray: the samples are newline, E, I, newline.
+		{"BI /W 4 /H 1 /BPC 8 /CS /G ID \nEI\n EI Q", "\nEI\n"},
+		// 2x1 RGB at 4 bits: 3 bytes.
+		{"BI /W 2 /H 1 /BPC 4 /CS /RGB ID  EI EI Q", " EI"},
+		// Stencil, 9x2: rows pad to 2 bytes.
+		{"BI /W 9 /H 2 /IM true ID EI\nE EI Q", "EI\nE"},
+		// The header undercounts (2 bytes, 3 written): the search finds EI.
+		{"BI /W 2 /H 1 /BPC 8 /CS /G ID abc EI Q", "abc"},
+		// A space from the page's resources: unknown, so searched.
+		{"BI /W 2 /H 1 /BPC 8 /CS /CS0 ID ab EI Q", "ab"},
+	} {
+		info, end, err := p.InlineImage(strings.NewReader(tc.content), 0, codec)
+		if err != nil {
+			t.Errorf("%q: %v", tc.content, err)
+			continue
+		}
+		sp := info.Payload
+		if got := tc.content[sp.Offset : sp.Offset+sp.Length]; got != tc.data {
+			t.Errorf("%q: data %q, want %q", tc.content, got, tc.data)
+		}
+		if rest := strings.TrimSpace(tc.content[end:]); rest != "Q" {
+			t.Errorf("%q: resumes at %q, want Q", tc.content, rest)
 		}
 	}
 }

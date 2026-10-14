@@ -177,6 +177,9 @@ func imageDoc(t *testing.T) (r *bytes.Reader, pdf *PDF, codec *Codec, jpg []byte
 		// 18: RGB with soft mask 19 at a higher resolution, and a color key.
 		streamObj(img+"/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB /SMask 19 0 R /Mask [0 0 0 0 0 0]", []byte{1, 2, 3, 0, 0, 0}),
 		streamObj(img+"/Width 4 /Height 3 /BitsPerComponent 8 /ColorSpace /DeviceGray", []byte{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}),
+		// 20: JPEG in a Separation space: its samples are ink tints, which
+		// read as gray levels come out inverted.
+		streamObj(img+"/Width 8 /Height 8 /BitsPerComponent 8 /ColorSpace [/Separation /Black /DeviceGray 5 0 R] /Filter /DCTDecode", jbuf.Bytes()),
 	)
 	return r, pdf, codec, jbuf.Bytes()
 }
@@ -206,7 +209,8 @@ func TestImageDecode(t *testing.T) {
 		{7, []color.NRGBA{rgb(255, 0, 0)}, nil},
 		{8, []color.NRGBA{rgba(1, 2, 3, 128), rgba(4, 5, 6, 128), rgba(7, 8, 9, 128), rgba(10, 11, 12, 128)}, nil},
 		{10, []color.NRGBA{rgba(5, 5, 5, 0), gray(11), gray(200)}, nil},
-		{11, []color.NRGBA{rgba(0, 0, 0, 255), rgba(0, 0, 0, 0)}, nil},
+		// An *image.Alpha carries no color: opaque reads back as white.
+		{11, []color.NRGBA{rgba(255, 255, 255, 255), rgba(0, 0, 0, 0)}, nil},
 		{12, []color.NRGBA{gray(50), rgba(60, 60, 60, 0)}, nil},
 		{13, pixels(jpegWant), nil},
 		{14, nil, ErrUnsupportedImage},
@@ -216,6 +220,7 @@ func TestImageDecode(t *testing.T) {
 		// Mask row 0 of 3 lands, columns 0 and 2 of 4; the second pixel is
 		// keyed out whatever the mask says.
 		{18, []color.NRGBA{rgba(1, 2, 3, 10), rgba(0, 0, 0, 0)}, nil},
+		{20, nil, ErrUnsupportedImage},
 	} {
 		var d ImageDecoder
 		got, err := decodeObj(t, &d, r, pdf, codec, tc.num)
@@ -233,6 +238,90 @@ func TestImageDecode(t *testing.T) {
 	d := ImageDecoder{MaxPixels: 1}
 	if _, err := decodeObj(t, &d, r, pdf, codec, 1); !errors.Is(err, errImageTooLarge) {
 		t.Errorf("MaxPixels 1: err = %v, want %v", err, errImageTooLarge)
+	}
+}
+
+// TestImageDecodeAdobeCMYK pins a CMYK JPEG without /Decode decoding to its
+// samples as stored, which is how PDF readers take them: the corpus file's
+// photographs show right that way and as negatives through image/jpeg, which
+// inverts four-component JPEGs as a JPEG file reader must.
+func TestImageDecodeAdobeCMYK(t *testing.T) {
+	f, err := os.ReadFile("testdata/basis-of-embedded.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(f)
+	pdf, codec := decodeDoc(t, r, r.Size())
+	sizeV, err := codec.DictGet(pdf, r, pdf.Trailer(), "Size")
+	if err != nil {
+		t.Fatal(err)
+	}
+	size, _ := sizeV.Int()
+	checked := 0
+	for num := uint32(1); num < uint32(size); num++ {
+		v, err := pdf.Resolve(r, ObjectID{Num: num}, codec)
+		if err != nil || v.Tok != piulex.TokStream {
+			continue
+		}
+		info, err := pdf.ImageInfo(r, v, codec)
+		if err != nil || !isDCT(&info) {
+			continue
+		}
+		if !info.Decode.IsNull() {
+			t.Fatalf("object %d has a /Decode; the corpus is expected to have none", num)
+		}
+		var d ImageDecoder
+		img, err := d.Decode(nil, pdf, r, info, codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := img.(*image.CMYK)
+		if !ok {
+			t.Fatalf("object %d decoded to %T, want *image.CMYK", num, img)
+		}
+		sp := info.Payload
+		jimg, err := jpeg.Decode(bytes.NewReader(f[sp.Offset : sp.Offset+sp.Length]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, v := range jimg.(*image.CMYK).Pix {
+			if got.Pix[i] != 255-v {
+				t.Fatalf("object %d: sample %d = %d, want the stored %d", num, i, got.Pix[i], 255-v)
+			}
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no DCTDecode images in the corpus file")
+	}
+}
+
+// TestImageDecodeJPEGHeaderSize pins MaxPixels holding against the JPEG's own
+// frame header, which is what image/jpeg allocates from: a dictionary claiming
+// 1x1 over a JPEG claiming 65535x65535 must be refused, not decoded.
+func TestImageDecodeJPEGHeaderSize(t *testing.T) {
+	var jbuf bytes.Buffer
+	if err := jpeg.Encode(&jbuf, image.NewGray(image.Rect(0, 0, 8, 8)), nil); err != nil {
+		t.Fatal(err)
+	}
+	jpg := jbuf.Bytes()
+	sof := bytes.Index(jpg, []byte{0xff, 0xc0})
+	if sof < 0 {
+		t.Fatal("no SOF0 in encoded JPEG")
+	}
+	// SOF0: marker, length(2), precision(1), height(2), width(2).
+	jpg[sof+5], jpg[sof+6], jpg[sof+7], jpg[sof+8] = 0xff, 0xff, 0xff, 0xff
+	const img = "/Type /XObject /Subtype /Image /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /DCTDecode "
+	r, pdf, codec := doc(t,
+		streamObj(img+"/Width 1 /Height 1", jpg),
+		// The same JPEG as another image's soft mask.
+		streamObj(img+"/Width 1 /Height 1 /SMask 1 0 R", jpg),
+	)
+	for num := uint32(1); num <= 2; num++ {
+		var d ImageDecoder
+		if _, err := decodeObj(t, &d, r, pdf, codec, num); !errors.Is(err, errImageTooLarge) {
+			t.Errorf("object %d: err = %v, want %v", num, err, errImageTooLarge)
+		}
 	}
 }
 

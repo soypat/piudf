@@ -448,6 +448,15 @@ func (d *Doc) fontidx(basename string) int {
 	return -1
 }
 
+func (d *Doc) imageidx(img piupage.Image) int {
+	for i := range d.images {
+		if d.images[i] == img {
+			return i
+		}
+	}
+	return -1
+}
+
 // fontGlyphs is the run of d.glyphs belonging to the font at index i, which the
 // sort left contiguous and ascending.
 func (d *Doc) fontGlyphs(i int) []piupage.GlyphUse {

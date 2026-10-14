@@ -12,6 +12,11 @@ import (
 // encoded when it is written; a *JPEG is one whose file is embedded as it
 // stands. A canvas tells images apart by ==, so an Image must be comparable:
 // pass pointers, which every image/... type is.
+//
+// An image is written once per document, when the document is, however many
+// times it is drawn: its pixels must not change until then. Redrawing one
+// buffer for every page puts its last drawing on all of them; draw distinct
+// pictures from distinct images.
 type Image interface {
 	Bounds() image.Rectangle
 }
@@ -19,6 +24,12 @@ type Image interface {
 // JPEG is a JPEG file drawn without decoding: its bytes become a DCTDecode
 // stream, which is a JPEG file as it stands. The zero JPEG holds no file; see
 // [JPEG.Reset].
+//
+// An Adobe CMYK JPEG file stores its samples inverted, and JPEG readers undo
+// that on the strength of its APP14 segment. PDF readers do not: a DCTDecode
+// stream's samples are taken as they are stored, which is why CMYK JPEGs
+// extracted from PDFs often show as negatives. Such a file is written with a
+// /Decode inverting every component, so that it shows as it does on its own.
 type JPEG struct {
 	data        []byte
 	w, h, comps int
@@ -148,7 +159,7 @@ func (ie *ImageEncoder) writeJPEG(enc *piudf.Encoder, j *JPEG) (piudf.ObjectID, 
 	enc.Name("BitsPerComponent")
 	enc.Int(8)
 	if j.adobe && j.comps == 4 {
-		// The convention PDF producers follow for Adobe's inverted CMYK.
+		// PDF readers take the inverted samples as stored; see JPEG.
 		enc.Name("Decode")
 		enc.ArrayOpen()
 		for range 4 {

@@ -296,25 +296,50 @@ func (d *ImageDecoder) decodeMask(out *image.NRGBA, pdf *PDF, r io.ReaderAt, id 
 	return s.result()
 }
 
-// decodeJPEG decodes a DCTDecode payload, which is a JPEG file as it stands.
-// The JPEG carries its own color model; a /Decode inverting every component,
-// which is how PDF producers mark Adobe-inverted CMYK, is applied on top.
+// decodeJPEG decodes a DCTDecode payload, which is a JPEG file as it stands,
+// with /Decode applied when it inverts every component.
+//
+// PDF takes a CMYK JPEG's samples as they are stored. image/jpeg follows the
+// convention for JPEG files instead, which store Adobe CMYK inverted, and
+// inverts every four-component image it decodes (YCCK included: it differs
+// from libjpeg's output by exactly that). So its CMYK is inverted back, unless
+// /Decode asks for the inversion. testdata/basis-of-embedded.pdf, whose CMYK
+// JPEGs have no /Decode, shows negatives otherwise.
 func (d *ImageDecoder) decodeJPEG(pdf *PDF, r io.ReaderAt, info *ImageInfo, codec *Codec) (image.Image, error) {
+	switch info.ColorSpace {
+	case ColorSpaceLab, ColorSpaceSeparation, ColorSpaceDeviceN:
+		// The JPEG's color model is a device one; its samples here are not.
+		// A Separation's are ink tints, which read as gray come out inverted.
+		return nil, ErrUnsupportedImage
+	}
 	sp := info.Payload
+	// image/jpeg allocates from the JPEG's frame header, not from /Width and
+	// /Height, and the two need not agree: the header is what gets checked.
+	cfg, err := jpeg.DecodeConfig(io.NewSectionReader(r, sp.Offset, sp.Length))
+	if err != nil {
+		return nil, err
+	} else if err = d.checkDims(cfg.Width, cfg.Height); err != nil {
+		return nil, err
+	}
 	img, err := jpeg.Decode(io.NewSectionReader(r, sp.Offset, sp.Length))
 	if err != nil {
 		return nil, err
 	}
 	var dec [8]float64
 	n, err := readFloats(dec[:], pdf, r, info.Decode, codec)
-	if err != nil || !allInverted(dec[:n]) {
-		return img, err
+	if err != nil {
+		return nil, err
 	}
+	inverted := allInverted(dec[:n])
 	switch m := img.(type) {
 	case *image.CMYK:
-		invert(m.Pix)
+		if !inverted {
+			invert(m.Pix) // Back to the samples as stored.
+		}
 	case *image.Gray:
-		invert(m.Pix)
+		if inverted {
+			invert(m.Pix)
+		}
 	default:
 		// YCbCr: inverting it means converting it, and a JPEG producer that
 		// meant inverted RGB is one nobody has met.
@@ -341,11 +366,16 @@ func (d *ImageDecoder) open(pdf *PDF, r io.ReaderAt, info *ImageInfo, codec *Cod
 }
 
 func (d *ImageDecoder) checkSize(info *ImageInfo) error {
+	return d.checkDims(info.Width, info.Height)
+}
+
+// checkDims bounds a w×h image by MaxPixels.
+func (d *ImageDecoder) checkDims(w, h int) error {
 	maxpx := d.MaxPixels
 	if maxpx <= 0 {
 		maxpx = defaultMaxPixels
 	}
-	if int64(info.Width)*int64(info.Height) > int64(maxpx) {
+	if int64(w)*int64(h) > int64(maxpx) {
 		return errImageTooLarge
 	}
 	return nil

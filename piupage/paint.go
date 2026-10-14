@@ -11,6 +11,8 @@ var (
 	errImageType  = errors.New("piupage: image is neither an image.Image nor a *JPEG")
 	errImageEmpty = errors.New("piupage: image has no pixels")
 	errJPEG       = errors.New("piupage: not a baseline or progressive 8-bit JPEG with 1, 3 or 4 components")
+
+	errImageNotComparable = errors.New("piupage: image cannot be compared with ==; pass a pointer")
 )
 
 // CapStyle is how a stroke ends an open subpath.
