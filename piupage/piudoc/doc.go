@@ -84,7 +84,11 @@ type Doc struct {
 	Creator string
 	Date    time.Time
 	Lang    string
-	OnPage  func(c *piupage.Canvas, p PageInfo)
+	// OnPage draws page furniture, running headers and folios, once per page
+	// after the story is laid out. An image it draws should be made once,
+	// outside it: one made inside is a new image each page, and is embedded
+	// once per page. See [Image].
+	OnPage func(c *piupage.Canvas, p PageInfo)
 
 	// CheckGlyphs fails [Doc.Build] on a glyph the font cannot draw or a font
 	// too damaged to describe itself. NOT IMPLEMENTED: setting it does nothing.

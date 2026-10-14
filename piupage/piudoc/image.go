@@ -9,6 +9,12 @@ import (
 // Image draws a picture at the story cursor, the reportlab Image flowable
 // analogue. The picture is written once for the document however many pages
 // or places draw it.
+//
+// Once means once per Img value: images are told apart by ==, which for the
+// pointers every image/... type is means by identity, not by content. Image
+// flowables and OnPage drawings sharing one Img embed it once; equal pixels
+// behind two pointers, or two *piupage.JPEG reset to the same file, are
+// embedded once each. Build a picture once and reuse it.
 type Image struct {
 	Img piupage.Image
 	// Width and Height are the drawn size in points. One left zero follows
