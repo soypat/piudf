@@ -107,6 +107,10 @@ type Doc struct {
 	pageIDs []piudf.ObjectID
 	// annots is scratch: the link annotations of the page being written.
 	annots []piudf.ObjectID
+	// images is every image the pages drew, written once each as imageids.
+	images   []piupage.Image
+	imageids []piudf.ObjectID
+	imgEnc   piupage.ImageEncoder
 }
 type PageSize struct {
 	W, H float64
@@ -142,6 +146,8 @@ func (d *Doc) Reset(w io.Writer, encBuf []byte) (err error) {
 	d.fontids = d.fontids[:0]
 	d.marks = d.marks[:0]
 	d.annots = d.annots[:0]
+	d.images = d.images[:0]
+	d.imageids = d.imageids[:0]
 	return nil
 }
 
@@ -252,6 +258,20 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		}
 		d.fontids = append(d.fontids, id)
 	}
+	// Images likewise: one XObject each, however many pages draw it.
+	for i := range nCanv {
+		for _, img := range dst[i].Images() {
+			if d.imageidx(img) >= 0 {
+				continue
+			}
+			id, err := d.imgEnc.Write(&d.enc, img)
+			if err != nil {
+				return nCanv, nStories, err
+			}
+			d.images = append(d.images, img)
+			d.imageids = append(d.imageids, id)
+		}
+	}
 
 	d.pageIDs = append(d.pageIDs, make([]piudf.ObjectID, nCanv)...)
 	for icv := range nCanv {
@@ -322,6 +342,16 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 			d.enc.Ref(id.Num, id.Gen)
 		}
 		d.enc.DictClose()
+		if imgs := cv.Images(); len(imgs) > 0 {
+			d.enc.Name("XObject")
+			d.enc.DictOpen()
+			for i, img := range imgs {
+				id := d.imageids[d.imageidx(img)]
+				d.enc.NameNum("Im", int64(i+1))
+				d.enc.Ref(id.Num, id.Gen)
+			}
+			d.enc.DictClose()
+		}
 		d.enc.DictClose()
 		d.enc.DictClose()
 		d.enc.EndObject()

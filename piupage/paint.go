@@ -6,8 +6,11 @@ import (
 )
 
 var (
-	errGDepth   = errors.New("piupage: graphics state nested too deeply")
-	errUnclosed = errors.New("piupage: content stream ends with an unrestored Save")
+	errGDepth     = errors.New("piupage: graphics state nested too deeply")
+	errUnclosed   = errors.New("piupage: content stream ends with an unrestored Save")
+	errImageType  = errors.New("piupage: image is neither an image.Image nor a *JPEG")
+	errImageEmpty = errors.New("piupage: image has no pixels")
+	errJPEG       = errors.New("piupage: not a baseline or progressive 8-bit JPEG with 1, 3 or 4 components")
 )
 
 // CapStyle is how a stroke ends an open subpath.

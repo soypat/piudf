@@ -25,6 +25,8 @@ type Canvas struct {
 	// so the Canvas only collects them; the page writer emits them.
 	links  []Link
 	glyphs []GlyphUse
+	// images lists the images drawn in first-use order, assigning /Im1, /Im2 …
+	images []Image
 	// Text encodes
 	enc []byte
 	// ctm is the transform in effect and stack the ones q has saved.
@@ -43,6 +45,7 @@ type Mark struct {
 	fonts   int
 	links   int
 	glyphs  int
+	images  int
 	curFont Font
 	curSize float64
 	ctm     Matrix
@@ -55,33 +58,37 @@ func (c *Canvas) Mark() Mark {
 	c.emit.Flush()
 	return Mark{
 		n: c.buf.Len(), fonts: len(c.used), links: len(c.links), glyphs: len(c.glyphs),
+		images:  len(c.images),
 		curFont: c.curFont, curSize: c.curSize,
 		ctm: c.ctm, depth: c.depth,
 	}
 }
 
-// Rewind discards every operator, font reference, and link recorded since m was
-// taken. Passing a Mark from a different canvas or one taken before a
-// [Canvas.Reset] is a programming error and does nothing.
+// Rewind discards every operator, font and image reference, and link recorded
+// since m was taken. Passing a Mark from a different canvas or one taken before
+// a [Canvas.Reset] is a programming error and does nothing.
 func (c *Canvas) Rewind(m Mark) {
 	c.emit.Flush()
-	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) || m.glyphs > len(c.glyphs) {
+	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) || m.glyphs > len(c.glyphs) ||
+		m.images > len(c.images) {
 		return
 	}
 	c.buf.Truncate(m.n)
 	c.used = c.used[:m.fonts]
 	c.links = c.links[:m.links]
 	c.glyphs = c.glyphs[:m.glyphs]
+	c.images = c.images[:m.images]
 	c.curFont = m.curFont
 	c.curSize = m.curSize
 	c.ctm = m.ctm
 	c.depth = m.depth
 }
 
-// Reset clears the content buffer and font set for reuse on a new page.
+// Reset clears the content buffer, font and image sets for reuse on a new page.
 func (c *Canvas) Reset(emitScratch []byte) error {
 	c.buf.Reset()
 	c.used = c.used[:0]
+	c.images = c.images[:0]
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
@@ -293,6 +300,38 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	*ln = Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: ln.URI[:0]}
 	ln.URI = append(ln.URI, uri...)
 }
+
+// Image draws img stretched over the rectangle at (x,y) of size w×h,
+// registering it in the page's resources. A nil img is ignored.
+func (c *Canvas) Image(x, y, w, h float64, img Image) {
+	if img == nil {
+		return
+	}
+	num := c.ensureImage(img)
+	// An image XObject paints the unit square; cm maps it onto the rectangle,
+	// and q/Q keep that from leaking into what is drawn next.
+	s := c.Save()
+	c.Transform(Matrix{A: w, D: h, E: x, F: y})
+	c.emit.NameNum("Im", int64(num))
+	c.emit.Ident("Do")
+	c.Restore(s)
+}
+
+// ensureImage registers img and returns its resource number (the N of /ImN).
+func (c *Canvas) ensureImage(img Image) int {
+	for i := range c.images {
+		if c.images[i] == img {
+			return i + 1
+		}
+	}
+	c.images = append(c.images, img)
+	return len(c.images)
+}
+
+// Images returns the images drawn on this page in first-use order: the i-th is
+// resource /Im<i+1> of the page's /XObject dictionary. The slice is the
+// canvas's own storage and stays valid until the next [Canvas.Reset].
+func (c *Canvas) Images() []Image { return c.images }
 
 // Links returns the page's link areas in the order they were added. The slice
 // is the canvas's own storage and stays valid until the next [Canvas.Reset],
