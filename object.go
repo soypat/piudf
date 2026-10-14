@@ -115,7 +115,20 @@ type objStm struct {
 	// is the pair table stmObjectAt walks.
 	n     int64
 	first int64
+	// The pair table sits ahead of every object, so walking it after reading
+	// one means a rewind and a decode from the stream's first byte. A walk
+	// therefore keeps the pairs past the one it was asked for: entries
+	// [aheadAt, aheadAt+aheadN) of the table, so an ascending sweep walks the
+	// table once per window rather than once per object. aheadN zero is none.
+	aheadAt  int64
+	aheadN   int
+	aheadNum [objStmAhead]uint32
+	aheadOff [objStmAhead]int64
 }
+
+// objStmAhead bounds the pair table entries one walk keeps. Writers commonly
+// put 100 to 200 objects in a stream, so a sweep walks each a handful of times.
+const objStmAhead = 64
 
 // reset forgets the object stream the cursor holds. num is the load flag, so
 // zeroing it alone would do, but the whole cursor is scratch.
@@ -269,8 +282,8 @@ func (pdf *PDF) loadObjStm(r io.ReaderAt, num uint32, codec *Codec) error {
 		return errTODO
 	}
 	// num is cleared first: a failed reset must not leave the cursor claiming
-	// to hold a stream it does not.
-	stm.num = 0
+	// to hold a stream it does not, nor pairs of the stream it held.
+	stm.num, stm.aheadN = 0, 0
 	if err = stm.data.Reset(r, sp.Offset, sp.Length, sp.codec.flate()); err != nil {
 		return err
 	}
@@ -289,16 +302,37 @@ const maxInflateRatio = 1032
 
 // stmObjectAt returns the decoded offset of the idx'th object of the loaded
 // object stream, which must be object want. The stream begins with /N pairs of
-// "object number, offset", so this walks the pair table: forward from the
-// cursor's first byte, which is where it already stands.
+// "object number, offset". A pair the last walk kept costs nothing; any other
+// walks the table from the cursor's first byte.
 func (pdf *PDF) stmObjectAt(codec *Codec, idx int64, want uint32) (int64, error) {
 	stm := &codec.stm
 	if idx < 0 || idx >= stm.n {
 		// The xref places the object at an index its own stream denies.
 		return 0, errObjStmBad
 	}
+	k := idx - stm.aheadAt
+	if k < 0 || k >= int64(stm.aheadN) {
+		if err := pdf.walkObjStmPairs(codec, idx); err != nil {
+			return 0, err
+		}
+		k = 0
+	}
+	if stm.aheadNum[k] != want {
+		return 0, errObjectIDMismatch
+	}
+	if stm.aheadOff[k] < 0 {
+		return 0, errObjStmBad
+	}
+	return stm.first + stm.aheadOff[k], nil
+}
+
+// walkObjStmPairs reads pair idx of the loaded object stream's table and keeps
+// it, with as many of the pairs after it as the window holds.
+func (pdf *PDF) walkObjStmPairs(codec *Codec, idx int64) error {
+	stm := &codec.stm
+	stm.aheadN = 0
 	if err := codec.lexAt(&stm.data, 0); err != nil {
-		return 0, err
+		return err
 	}
 	codec.accumErr = nil
 	var num, off Value
@@ -307,15 +341,23 @@ func (pdf *PDF) stmObjectAt(codec *Codec, idx int64, want uint32) (int64, error)
 		off = codec.nextValue(piulex.TokInt, errObjStmBad)
 	}
 	if codec.accumErr != nil {
-		return 0, codec.accumErr
+		return codec.accumErr
 	}
-	if uint32(num.I) != want {
-		return 0, errObjectIDMismatch
+	stm.aheadAt, stm.aheadN = idx, 1
+	stm.aheadNum[0], stm.aheadOff[0] = uint32(num.I), off.I
+	for stm.aheadN < objStmAhead && idx+int64(stm.aheadN) < stm.n {
+		num = codec.nextValue(piulex.TokInt, errObjStmBad)
+		off = codec.nextValue(piulex.TokInt, errObjStmBad)
+		if codec.accumErr != nil {
+			// A bad pair further on is the business of whoever asks for it,
+			// whose walk will stop there; it must not fail this one.
+			codec.accumErr = nil
+			break
+		}
+		stm.aheadNum[stm.aheadN], stm.aheadOff[stm.aheadN] = uint32(num.I), off.I
+		stm.aheadN++
 	}
-	if off.I < 0 {
-		return 0, errObjStmBad
-	}
-	return stm.first + off.I, nil
+	return nil
 }
 
 // resolveCompressed returns the value of object id, which lives at index idx

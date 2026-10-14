@@ -355,6 +355,55 @@ func TestResolveCompressed(t *testing.T) {
 	t.Logf("catalog in object stream, %d pages", count)
 }
 
+// TestResolveCompressedLookahead resolves every compressed object of the
+// datasheet ascending, where the pairs a walk keeps serve the objects after it,
+// then a sample descending, where each resolve walks the table afresh. Both
+// must agree. The stride is coprime with objStmAhead so the sample lands on
+// every position of the window; descending is the slow path, hence a sample.
+func TestResolveCompressedLookahead(t *testing.T) {
+	c, size := openCounted(t, fpathMCUSpec)
+	var pdf PDF
+	codec := newCodec(make([]byte, 4096))
+	codec.maxLazySections = 4096
+	if err := pdf.Decode(c, size, codec); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	// The descending pass would otherwise restart the xref decode per object.
+	codec.rows.setCache(make([]byte, pdf.XrefCacheSize()))
+	var last uint32
+	for _, s := range pdf.sections {
+		last = max(last, s.firstObj+s.count)
+	}
+	var ids []ObjectID
+	for num := uint32(1); num < last; num++ {
+		e, err := pdf.Lookup(c, num, codec)
+		if err != nil {
+			t.Fatalf("object %d: %v", num, err)
+		}
+		if e.Kind == XrefCompressed {
+			ids = append(ids, e.ID)
+		}
+	}
+	asc := make([]Value, len(ids))
+	for i, id := range ids {
+		v, err := pdf.Resolve(c, id, codec)
+		if err != nil {
+			t.Fatalf("object %d ascending: %v", id.Num, err)
+		}
+		asc[i] = v
+	}
+	for i := len(ids) - 1; i >= 0; i -= 17 {
+		v, err := pdf.Resolve(c, ids[i], codec)
+		if err != nil {
+			t.Fatalf("object %d descending: %v", ids[i].Num, err)
+		}
+		if v != asc[i] {
+			t.Errorf("object %d: %+v descending, %+v ascending", ids[i].Num, v, asc[i])
+		}
+	}
+	t.Logf("%d compressed objects", len(ids))
+}
+
 // TestLookupAllocs pins the claim the cursors are built on: a lookup decodes
 // through the Codec's own storage and the file, and neither escapes. The
 // inflate window is allocated once and reused, so it must not show up here.
