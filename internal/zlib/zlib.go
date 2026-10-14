@@ -113,10 +113,14 @@ type Reader struct {
 }
 
 // Configure hands z the memory of cfg and validates its sizes, building the
-// fixed Huffman table once. It must be called before Reset.
+// fixed Huffman table once. It must be called before Reset. A zero cfg means
+// defaults: DefaultConfig on first use, and the memory z already holds after,
+// so reconfiguring an owner for unrelated reasons does not reallocate.
 func (z *Reader) Configure(cfg Config) error {
 	if cfg.IsZero() {
-		if len(z.inf.br.buf) == 0 {
+		if z.configured {
+			cfg = Config{Window: z.inf.win.hist, Links: z.inf.links, Input: z.inf.br.buf}
+		} else {
 			cfg = DefaultConfig()
 		}
 	}

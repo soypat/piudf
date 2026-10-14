@@ -14,6 +14,7 @@ var (
 	errEmitIdent    = errors.New("piulex: ident with non-regular byte")
 	errEmitRealForm = errors.New("piulex: real is NaN, infinite or out of PDF range")
 	errEmitSetPos   = errors.New("piulex: SetPos with bytes buffered")
+	errEmitNoBuffer = errors.New("piulex: emitter not reset")
 )
 
 // MinEmitBuffer is the smallest buffer [Emitter.Reset] accepts: enough for the
@@ -77,7 +78,14 @@ func (e *Emitter) Flush() error {
 }
 
 func (e *Emitter) flush() {
-	if e.err != nil || e.n == 0 {
+	if e.err != nil {
+		return
+	} else if len(e.buf) < MinEmitBuffer {
+		// Never Reset: there is no window to write through, and the writes
+		// that called here would wait forever for one to free up.
+		e.err = errEmitNoBuffer
+		return
+	} else if e.n == 0 {
 		return
 	}
 	n, err := e.w.Write(e.buf[:e.n])
@@ -390,6 +398,9 @@ func (e *Emitter) raw(b []byte) {
 }
 
 func (e *Emitter) rawstr(s string) {
+	if len(e.buf) == 0 {
+		panic("zero length buffer used")
+	}
 	for e.err == nil && len(s) > 0 {
 		if e.n == len(e.buf) {
 			e.flush()

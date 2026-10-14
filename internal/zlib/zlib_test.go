@@ -167,6 +167,32 @@ func TestShortBuffers(t *testing.T) {
 	}
 }
 
+// TestReconfigureZero checks that a zero Config on a configured Reader keeps
+// its memory rather than failing or reallocating, which is what an owner
+// reconfiguring for unrelated reasons (a Codec gaining an xref cache) does.
+func TestReconfigureZero(t *testing.T) {
+	var z Reader
+	if err := z.Configure(Config{}); err != nil {
+		t.Fatal(err)
+	}
+	win := z.inf.win.hist
+	if err := z.Configure(Config{}); err != nil {
+		t.Fatalf("second zero Configure: %v", err)
+	}
+	if &z.inf.win.hist[0] != &win[0] {
+		t.Error("second zero Configure replaced the window")
+	}
+	data := skewed(100000, 4)
+	comp := zlibCompress(t, data, stdzlib.BestCompression)
+	got, err := inflateAll(&z, bytes.NewReader(comp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Error("inflate mismatch after reconfigure")
+	}
+}
+
 // TestShortLinks feeds a stream needing overflow tables to a Reader with no link
 // buffer and expects the explicit error, not an allocation or a wrong result.
 func TestShortLinks(t *testing.T) {

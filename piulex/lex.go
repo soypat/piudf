@@ -175,6 +175,63 @@ func (l *Lexer) StreamDataStart() (Pos, error) {
 	return 0, &SyntaxError{Off: l.Pos(), Msg: "expected EOL after 'stream' keyword"}
 }
 
+// InlineImageData returns the span of an inline image's data and moves the
+// lexer past the EI operator ending it. Call immediately after NextToken
+// returned the ID operator, which a single whitespace byte separates from the
+// data (ISO 32000-1 8.9.7).
+//
+// length is the data's byte count when the image dictionary states it (/L or
+// /Length, PDF 2.0), and negative otherwise. Without it the data ends at the
+// first EI with whitespace before it and whitespace, a delimiter or the end of
+// input after it: the rule every reader uses, and a guess, since nothing stops
+// binary data from holding those bytes itself. The whitespace before EI is the
+// separator, not data.
+func (l *Lexer) InlineImageData(length int64) (start Pos, n int64, err error) {
+	if !l.chvalid || !isWhitespace(l.ch) {
+		return 0, 0, &SyntaxError{Off: l.Pos(), Msg: "expected whitespace after 'ID'"}
+	}
+	l.advance()
+	start = l.Pos()
+	if length >= 0 {
+		l.pos += length
+		l.ch, l.chvalid = l.w.ByteAt(l.pos)
+		l.SkipWhitespace()
+		if !l.atEI() {
+			return start, 0, &SyntaxError{Off: l.Pos(), Msg: "expected 'EI' after inline image data"}
+		}
+		l.advance()
+		l.advance()
+		return start, length, nil
+	}
+	// The separator after ID counts as whitespace before EI: an image with
+	// no data is "ID EI".
+	prevWS := true
+	for l.chvalid {
+		if prevWS && l.atEI() {
+			end := max(int64(start), l.pos-1)
+			l.advance()
+			l.advance()
+			return start, end - int64(start), nil
+		}
+		prevWS = isWhitespace(l.ch)
+		l.advance()
+	}
+	if err = l.w.Err(); err != nil && err != io.EOF {
+		return start, 0, err
+	}
+	return start, 0, &SyntaxError{Off: start, Msg: "inline image data without 'EI'"}
+}
+
+// atEI reports whether the lexer stands on an EI operator: the two bytes, then
+// whitespace, a delimiter or the end of input.
+func (l *Lexer) atEI() bool {
+	if !l.chvalid || l.ch != 'E' || !l.peekIs('I') {
+		return false
+	}
+	b, ok := l.w.ByteAt(l.pos + 2)
+	return !ok || !isRegular(b)
+}
+
 func (l *Lexer) SkipWhitespace() {
 	for l.chvalid {
 		switch {

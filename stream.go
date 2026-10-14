@@ -47,6 +47,11 @@ type Stream struct {
 	// sink absorbs the bytes a forward seek skips. They are decoded and
 	// dropped: reaching an offset means decoding everything before it.
 	sink [256]byte
+	// pred undoes a predictor over the inflated bytes when predicted is set,
+	// with the parameters in sc.
+	pred      predictReader
+	sc        streamCodec
+	predicted bool
 }
 
 func (strm *Stream) ConfigureDefault() {
@@ -75,6 +80,21 @@ func (s *Stream) Reset(r io.ReaderAt, off, length int64, compressed bool) error 
 		return errors.New("piudf: negative span")
 	}
 	s.r, s.off, s.length, s.compressed = r, off, length, compressed
+	s.predicted = false
+	return s.Rewind()
+}
+
+// resetCodec binds s to a payload span decoded per sc, whose chain must be
+// empty or a lone FlateDecode: a predictor in sc is undone over the inflated
+// bytes.
+func (s *Stream) resetCodec(r io.ReaderAt, off, length int64, sc *streamCodec) error {
+	if err := s.Reset(r, off, length, sc.flate()); err != nil {
+		return err
+	}
+	if sc.predictor <= 1 {
+		return nil
+	}
+	s.sc, s.predicted = *sc, true
 	return s.Rewind()
 }
 
@@ -95,6 +115,13 @@ func (s *Stream) Rewind() error {
 		return err
 	}
 	s.rd = rd
+	if s.predicted {
+		if err = s.pred.reset(rd, &s.sc); err != nil {
+			s.rd = nil
+			return err
+		}
+		s.rd = &s.pred
+	}
 	return nil
 }
 
@@ -194,4 +221,216 @@ func (s *spanReader) Read(b []byte) (int, error) {
 	n, err := s.r.ReadAt(b, s.off)
 	s.off += int64(n)
 	return n, err
+}
+
+// maxPredictRow bounds one predictor row. It admits every 16-bit RGBA or 8-bit
+// CMYK row up to the 65535 columns /Columns can name; a wider row is a
+// DeviceN image nobody draws or a corrupt dictionary, and either way not worth
+// half a megabyte per row.
+const maxPredictRow = 1 << 19
+
+// predictReader undoes a /Predictor (ISO 32000-1 7.4.4.4) over the bytes a
+// Flate or LZW filter decoded. Predictors are row transforms: a PNG row is
+// expressed against the row above, a TIFF row against the pixel to its left,
+// so it holds two rows and nothing more, whatever the image's height.
+type predictReader struct {
+	src io.Reader
+	// bufs holds the previous and current reconstructed rows, rowlen each.
+	bufs   []byte
+	rowlen int
+	// bpp is the PNG bytes-per-pixel, the distance to a pixel's left
+	// neighbour, rounded up to one for sub-byte samples (RFC 2083 section 6).
+	bpp int
+	// which is the index of the current row in bufs, and off..end the part of
+	// it Read has yet to return. A short final row has end < rowlen.
+	which, off, end int
+	png             bool
+	colors, bpc     uint8
+	// eof is set once the source has ended, possibly mid-row.
+	eof bool
+	ft  [1]byte
+}
+
+// predictRowLen returns the byte length of one predictor row of sc, or zero
+// when the parameters cannot describe one.
+func predictRowLen(sc *streamCodec) int {
+	bits := int(sc.columns) * int(sc.colors) * int(sc.bpc)
+	return (bits + 7) / 8
+}
+
+// reset binds p to src with sc's parameters, keeping the row storage of an
+// earlier binding when it is large enough. That storage is the one allocation
+// a predictor makes.
+func (p *predictReader) reset(src io.Reader, sc *streamCodec) error {
+	rowlen := predictRowLen(sc)
+	switch {
+	case rowlen <= 0:
+		return errBadPredictor
+	case rowlen > maxPredictRow:
+		return ErrCodecMemLimit
+	case sc.predictor == 2:
+		if sc.bpc != 8 && sc.bpc != 16 {
+			return errTODO // TODO: TIFF predictor on sub-byte samples.
+		}
+		p.png = false
+	case sc.predictor >= 10 && sc.predictor <= 15:
+		p.png = true
+	default:
+		return errBadPredictor // Values the format does not define.
+	}
+	if cap(p.bufs) < 2*rowlen {
+		p.bufs = make([]byte, 2*rowlen)
+	}
+	p.bufs = p.bufs[:2*rowlen]
+	// The row above the first is all zeros (ISO 32000-1 7.4.4.4).
+	clear(p.bufs)
+	p.src, p.rowlen = src, rowlen
+	p.bpp = max(1, int(sc.colors)*int(sc.bpc)/8)
+	p.colors, p.bpc = sc.colors, sc.bpc
+	p.which, p.off, p.end, p.eof = 0, 0, 0, false
+	return nil
+}
+
+func (p *predictReader) row(i int) []byte { return p.bufs[i*p.rowlen : (i+1)*p.rowlen] }
+
+// Read returns the reconstructed rows' bytes in order. A final row cut short by
+// the source is returned as far as it goes: the samples it holds decode
+// correctly, and refusing them would lose a whole image to one missing row.
+func (p *predictReader) Read(b []byte) (n int, err error) {
+	for n < len(b) {
+		if p.off == p.end {
+			if err = p.next(); err != nil {
+				return n, err
+			}
+		}
+		c := copy(b[n:], p.row(p.which)[p.off:p.end])
+		p.off += c
+		n += c
+	}
+	return n, nil
+}
+
+// next reconstructs the row after the current one.
+func (p *predictReader) next() error {
+	if p.eof {
+		return io.EOF
+	}
+	prev := p.row(p.which)
+	cur := p.row(1 - p.which)
+	if p.png {
+		// Each PNG row is preceded by the filter it was written with.
+		if _, err := io.ReadFull(p.src, p.ft[:]); err != nil {
+			if err == io.ErrUnexpectedEOF {
+				err = io.EOF
+			}
+			return err
+		}
+	}
+	n, err := io.ReadFull(p.src, cur)
+	switch {
+	case err == io.EOF && !p.png:
+		return io.EOF // Clean end between rows.
+	case err == io.EOF || err == io.ErrUnexpectedEOF:
+		p.eof = true
+		if n == 0 {
+			return io.EOF
+		}
+	case err != nil:
+		return err
+	}
+	if p.png {
+		// A short row is unfiltered against the matching prefix of prev,
+		// which is all a prefix of a PNG row depends on.
+		if err := unfilterPNG(cur[:n], prev[:n], p.ft[0], p.bpp); err != nil {
+			return err
+		}
+	} else {
+		unpredictTIFF(cur[:n], int(p.colors), p.bpc)
+	}
+	p.which = 1 - p.which
+	p.off, p.end = 0, n
+	return nil
+}
+
+// unpredictTIFF undoes TIFF predictor 2 on row in place: each sample is stored
+// as its difference from the same component of the pixel to its left. bpc is 8
+// or 16; 16-bit samples are big-endian, as everywhere in PDF.
+func unpredictTIFF(row []byte, colors int, bpc uint8) {
+	if bpc == 8 {
+		for i := colors; i < len(row); i++ {
+			row[i] += row[i-colors]
+		}
+		return
+	}
+	stride := 2 * colors
+	for i := stride; i+1 < len(row); i += 2 {
+		v := uint16(row[i])<<8 | uint16(row[i+1])
+		left := uint16(row[i-stride])<<8 | uint16(row[i-stride+1])
+		v += left
+		row[i], row[i+1] = byte(v>>8), byte(v)
+	}
+}
+
+// unfilterPNG reconstructs row cur in place from the row filter ft and the row
+// above it (RFC 2083 section 6.3). bpp is the distance in bytes to the
+// corresponding byte of the pixel to the left; a cross-reference stream's rows
+// are 8-bit single-component, so it passes one.
+//
+// The filters chain — each row is expressed against the one above — which is
+// why whoever reads them cannot skip.
+func unfilterPNG(cur, prev []byte, ft byte, bpp int) error {
+	switch ft {
+	case 0: // None.
+	case 1: // Sub.
+		for i := bpp; i < len(cur); i++ {
+			cur[i] += cur[i-bpp]
+		}
+	case 2: // Up.
+		for i := range cur {
+			cur[i] += prev[i]
+		}
+	case 3: // Average.
+		for i := range cur {
+			var a byte
+			if i >= bpp {
+				a = cur[i-bpp]
+			}
+			cur[i] += byte((int(a) + int(prev[i])) / 2)
+		}
+	case 4: // Paeth.
+		for i := range cur {
+			var a, c byte // Left and up-left reconstructed bytes.
+			if i >= bpp {
+				a = cur[i-bpp]
+				c = prev[i-bpp]
+			}
+			cur[i] += paeth(a, prev[i], c)
+		}
+	default:
+		return errBadPredictor
+	}
+	return nil
+}
+
+// paeth is the PNG Paeth predictor function (RFC 2083 section 6.6).
+func paeth(a, b, c byte) byte {
+	pa := int(b) - int(c)
+	pb := int(a) - int(c)
+	pc := pa + pb
+	if pa < 0 {
+		pa = -pa
+	}
+	if pb < 0 {
+		pb = -pb
+	}
+	if pc < 0 {
+		pc = -pc
+	}
+	if pa <= pb && pa <= pc {
+		return a
+	}
+	if pb <= pc {
+		return b
+	}
+	return c
 }

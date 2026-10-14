@@ -145,14 +145,21 @@ func TestEncodingWidthFollowsTheFontKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.curFont = FontHelvetica
-	if got := c.encode("abc", 0); len(got) != 3 {
+	if got, _ := c.encode("abc", 0); len(got) != 3 {
 		t.Errorf("built-in encoded %q in %d bytes, want 3", got, len(got))
 	}
-	if got := c.encode("中", 0); len(got) != 1 || got[0] != '?' {
+	if got, _ := c.encode("中", 0); len(got) != 1 || got[0] != '?' {
 		t.Errorf("an unencodable rune became %q, want %q", got, "?")
 	}
 	c.curFont = testTTF(t)
-	if got := c.encode("abc", 0); len(got) != 6 {
+	if got, _ := c.encode("abc", 0); len(got) != 6 {
 		t.Errorf("embedded encoded %q in %d bytes, want 6", got, len(got))
+	}
+	// The advance encode sums is the one StringWidth measures.
+	for _, f := range []Font{FontHelvetica, testTTF(t)} {
+		c.curFont = f
+		if _, adv := c.encode("Wave", 0); adv != StringWidth(f, "Wave", 1) {
+			t.Errorf("%s: encode advance %v, StringWidth %v", f.PostScriptName(), adv, StringWidth(f, "Wave", 1))
+		}
 	}
 }
