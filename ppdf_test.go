@@ -1149,6 +1149,7 @@ func TestImageInfoCorpus(t *testing.T) {
 		if err := pdf.Decode(c, size, codec); err != nil {
 			t.Fatalf("%s: Decode: %v", fpath, err)
 		}
+		codec.rows.setCache(make([]byte, pdf.XrefCacheSize()))
 		var last uint32
 		for _, s := range pdf.sections {
 			last = max(last, s.firstObj+s.count)
@@ -1328,6 +1329,9 @@ func TestAppendPageImagesCorpus(t *testing.T) {
 	if err := pdf.Decode(c, size, codec); err != nil {
 		t.Fatal(err)
 	}
+	// Resources point back at objects the cursor has passed; without the
+	// cache each costs the cross-reference stream from its first byte.
+	codec.rows.setCache(make([]byte, pdf.XrefCacheSize()))
 	cat := mustCatalog(t, &pdf, c, codec)
 	pages, err := pdf.Deref(c, mustGet(t, &pdf, c, codec, cat.v, "Pages"), codec)
 	if err != nil {

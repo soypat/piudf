@@ -252,6 +252,7 @@ func TestImageDecodeAdobeCMYK(t *testing.T) {
 	}
 	r := bytes.NewReader(f)
 	pdf, codec := decodeDoc(t, r, r.Size())
+	codec.rows.setCache(make([]byte, pdf.XrefCacheSize()))
 	sizeV, err := codec.DictGet(pdf, r, pdf.Trailer(), "Size")
 	if err != nil {
 		t.Fatal(err)
@@ -374,6 +375,7 @@ func TestImageDecodeCorpus(t *testing.T) {
 		defer f.Close()
 		st, _ := f.Stat()
 		pdf, codec := decodeDoc(t, f, st.Size())
+		codec.rows.setCache(make([]byte, pdf.XrefCacheSize()))
 		sizeV, err := codec.DictGet(pdf, f, pdf.Trailer(), "Size")
 		if err != nil {
 			t.Fatal(err)

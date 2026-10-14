@@ -115,6 +115,12 @@ type Doc struct {
 	images   []piupage.Image
 	imageids []piudf.ObjectID
 	imgEnc   piupage.ImageEncoder
+	// groups is every canvas placed on the pages or on another group, written
+	// once each as a Form XObject with id groupids. groupPath is scratch: the
+	// groups being collected, outermost first, which is what finds a cycle.
+	groups    []*piupage.Canvas
+	groupids  []piudf.ObjectID
+	groupPath []*piupage.Canvas
 }
 type PageSize struct {
 	W, H float64
@@ -152,6 +158,9 @@ func (d *Doc) Reset(w io.Writer, encBuf []byte) (err error) {
 	d.annots = d.annots[:0]
 	d.images = d.images[:0]
 	d.imageids = d.imageids[:0]
+	d.groups = d.groups[:0]
+	d.groupids = d.groupids[:0]
+	d.groupPath = d.groupPath[:0]
 	return nil
 }
 
@@ -226,22 +235,25 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 		}
 	}
 
+	// Canvases placed on the pages, or on one another, are written once each.
+	// They draw text and images of their own, so they are found first and
+	// gathered from like pages.
+	groupFirst := len(d.groups)
+	for i := range nCanv {
+		if err := d.collectGroups(&dst[i]); err != nil {
+			return nCanv, nStories, err
+		}
+	}
+
 	// Register every face and gather what each was asked to draw. A subset is
 	// cut once for the document, not once per page, so the glyphs have to be
 	// merged before any font is written.
 	fontFirst := len(d.fonts)
 	for i := range nCanv {
-		cv := &dst[i]
-		fonts := cv.Fonts()
-		for _, ft := range fonts {
-			if d.fontidx(ft.PostScriptName()) < 0 {
-				d.fonts = append(d.fonts, ft)
-			}
-		}
-		for _, gu := range cv.Glyphs() {
-			gu.Font = uint16(d.fontidx(fonts[gu.Font].PostScriptName()))
-			d.glyphs = append(d.glyphs, gu)
-		}
+		d.gatherGlyphs(&dst[i])
+	}
+	for _, g := range d.groups[groupFirst:] {
+		d.gatherGlyphs(g)
 	}
 	// Sorting by font and glyph puts each face's glyphs in one ascending run,
 	// which is the order the subsetter, the /W array and the /ToUnicode map all
@@ -264,16 +276,20 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 	}
 	// Images likewise: one XObject each, however many pages draw it.
 	for i := range nCanv {
-		for _, img := range dst[i].Images() {
-			if d.imageidx(img) >= 0 {
-				continue
-			}
-			id, err := d.imgEnc.Write(&d.enc, img)
-			if err != nil {
-				return nCanv, nStories, err
-			}
-			d.images = append(d.images, img)
-			d.imageids = append(d.imageids, id)
+		if err := d.writeImages(&dst[i]); err != nil {
+			return nCanv, nStories, err
+		}
+	}
+	for _, g := range d.groups[groupFirst:] {
+		if err := d.writeImages(g); err != nil {
+			return nCanv, nStories, err
+		}
+	}
+	// Then the groups, whose resources name the fonts and images just written
+	// and whose ids were reserved as they were found.
+	for i := groupFirst; i < len(d.groups); i++ {
+		if err := d.writeGroup(d.groups[i], d.groupids[i]); err != nil {
+			return nCanv, nStories, err
 		}
 	}
 
@@ -335,32 +351,75 @@ func (d *Doc) flow(dst []piupage.Canvas, story []Drawer, canvasBuf []byte) (nCan
 			}
 			d.enc.ArrayClose()
 		}
-		d.enc.Name("Resources")
-		d.enc.DictOpen()
-		d.enc.Name("Font")
-		d.enc.DictOpen()
-		for i, ft := range cv.Fonts() {
-			idx := d.fontidx(ft.PostScriptName())
-			id := d.fontids[idx]
-			d.enc.NameNum("F", int64(i+1))
-			d.enc.Ref(id.Num, id.Gen)
-		}
-		d.enc.DictClose()
-		if imgs := cv.Images(); len(imgs) > 0 {
-			d.enc.Name("XObject")
-			d.enc.DictOpen()
-			for i, img := range imgs {
-				id := d.imageids[d.imageidx(img)]
-				d.enc.NameNum("Im", int64(i+1))
-				d.enc.Ref(id.Num, id.Gen)
-			}
-			d.enc.DictClose()
-		}
-		d.enc.DictClose()
+		d.writeResources(cv)
 		d.enc.DictClose()
 		d.enc.EndObject()
 	}
 	return nCanv, nStories, d.enc.Err()
+}
+
+// writeResources writes the /Resources entry of a page or group dictionary:
+// the fonts, images and groups cv draws, by the names it drew them with.
+func (d *Doc) writeResources(cv *piupage.Canvas) {
+	d.enc.Name("Resources")
+	d.enc.DictOpen()
+	d.enc.Name("Font")
+	d.enc.DictOpen()
+	for i, ft := range cv.Fonts() {
+		idx := d.fontidx(ft.PostScriptName())
+		id := d.fontids[idx]
+		d.enc.NameNum("F", int64(i+1))
+		d.enc.Ref(id.Num, id.Gen)
+	}
+	d.enc.DictClose()
+	imgs, groups := cv.Images(), cv.Groups()
+	if len(imgs) > 0 || len(groups) > 0 {
+		d.enc.Name("XObject")
+		d.enc.DictOpen()
+		for i, img := range imgs {
+			id := d.imageids[d.imageidx(img)]
+			d.enc.NameNum("Im", int64(i+1))
+			d.enc.Ref(id.Num, id.Gen)
+		}
+		for i, g := range groups {
+			id := d.groupids[d.groupidx(g)]
+			d.enc.NameNum("Fm", int64(i+1))
+			d.enc.Ref(id.Num, id.Gen)
+		}
+		d.enc.DictClose()
+	}
+	d.enc.DictClose()
+}
+
+// gatherGlyphs registers cv's fonts and merges what it asked of them into
+// d.glyphs, renaming each glyph's font from cv's numbering to the document's.
+func (d *Doc) gatherGlyphs(cv *piupage.Canvas) {
+	fonts := cv.Fonts()
+	for _, ft := range fonts {
+		if d.fontidx(ft.PostScriptName()) < 0 {
+			d.fonts = append(d.fonts, ft)
+		}
+	}
+	for _, gu := range cv.Glyphs() {
+		gu.Font = uint16(d.fontidx(fonts[gu.Font].PostScriptName()))
+		d.glyphs = append(d.glyphs, gu)
+	}
+}
+
+// writeImages writes the images cv draws that no canvas before it drew.
+func (d *Doc) writeImages(cv *piupage.Canvas) error {
+	for _, img := range cv.Images() {
+		if d.imageidx(img) >= 0 {
+			continue
+		}
+		id, err := d.imgEnc.Write(&d.enc, img)
+		if err != nil {
+			return err
+		}
+		d.images = append(d.images, img)
+		d.imageids = append(d.imageids, id)
+	}
+	return nil
 }
 
 func (d *Doc) open() error {

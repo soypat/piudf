@@ -101,7 +101,8 @@ type DecoderConfig struct {
 	// (PDF 1.5 xref streams) and the object stream decoder. They must be
 	// distinct buffer sets — the two cursors can be live at once, so sharing
 	// memory would silently corrupt one. A zero Config for either is replaced
-	// with [zlib.DefaultConfig] (which allocates); pass your own to own the
+	// with [zlib.DefaultConfig] (which allocates) on the first Configure and
+	// keeps the memory already held on later ones; pass your own to own the
 	// memory or to set [zlib.Config.SkipChecksum].
 	XrefStreamConfig   zlib.Config
 	ObjectStreamConfig zlib.Config

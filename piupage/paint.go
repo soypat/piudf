@@ -3,6 +3,7 @@ package piupage
 import (
 	"errors"
 	"image/color"
+	"math"
 )
 
 var (
@@ -13,6 +14,7 @@ var (
 	errJPEG       = errors.New("piupage: not a baseline or progressive 8-bit JPEG with 1, 3 or 4 components")
 
 	errImageNotComparable = errors.New("piupage: image cannot be compared with ==; pass a pointer")
+	errPlaceSelf          = errors.New("piupage: canvas placed on itself")
 )
 
 // CapStyle is how a stroke ends an open subpath.
@@ -65,6 +67,7 @@ func (c *Canvas) Fill(p *Path, col color.Color) {
 	p.emit(&c.emit)
 	c.emit.Ident(fillOp(p.rule))
 	c.emit.EOL()
+	c.extend(p.Bounds())
 }
 
 // Stroke traces p with pen.
@@ -76,6 +79,23 @@ func (c *Canvas) Stroke(p *Path, pen Pen) {
 	p.emit(&c.emit)
 	c.emit.Ident("S")
 	c.emit.EOL()
+	c.extendStroke(p, pen)
+}
+
+// extendStroke grows the extent by p traced with pen. A miter join reaches up
+// to the miter limit half-widths past its corner; caps and other joins reach
+// at most √2, a square cap's corner.
+func (c *Canvas) extendStroke(p *Path, pen Pen) {
+	reach := math.Sqrt2
+	if pen.Join == MiterJoin {
+		miter := pen.Miter
+		if miter <= 0 {
+			miter = 10 // PDF's default; see Pen.
+		}
+		reach = max(reach, miter)
+	}
+	x0, y0, x1, y1 := p.Bounds()
+	c.extendPad(x0, y0, x1, y1, strokePad(pen.Width, reach))
 }
 
 // FillStroke fills p with col and traces it with pen in one operation, so that
@@ -97,6 +117,7 @@ func (c *Canvas) FillStroke(p *Path, col color.Color, pen Pen) {
 		c.emit.Ident("B")
 	}
 	c.emit.EOL()
+	c.extendStroke(p, pen) // The stroke covers the fill.
 }
 
 // Clip intersects the clipping region with p, so that later painting shows only

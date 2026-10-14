@@ -3,6 +3,7 @@ package piupage
 import (
 	"bytes"
 	"image/color"
+	"math"
 	"reflect"
 
 	"github.com/soypat/lefevre/sfnt"
@@ -28,6 +29,10 @@ type Canvas struct {
 	glyphs []GlyphUse
 	// images lists the images drawn in first-use order, assigning /Im1, /Im2 …
 	images []Image
+	// groups lists the canvases placed in first-use order, assigning /Fm1, /Fm2 …
+	groups []*Canvas
+	// ext bounds the ink drawn so far, in page space.
+	ext extent
 	// Text encodes
 	enc []byte
 	// ctm is the transform in effect and stack the ones q has saved.
@@ -39,6 +44,47 @@ type Canvas struct {
 // maxGDepth is the graphics state nesting Canvas admits. See Canvas.stack.
 const maxGDepth = 32
 
+// extent is a box in page space, empty until ok.
+type extent struct {
+	x0, y0, x1, y1 float64
+	ok             bool
+}
+
+// add grows e to hold the point (x, y).
+func (e *extent) add(x, y float64) {
+	if !e.ok {
+		*e = extent{x0: x, y0: y, x1: x, y1: y, ok: true}
+		return
+	}
+	e.x0, e.y0 = min(e.x0, x), min(e.y0, y)
+	e.x1, e.y1 = max(e.x1, x), max(e.y1, y)
+}
+
+// extend grows the canvas's extent to hold the user-space box from (x0,y0) to
+// (x1,y1). Under a rotation or shear the box's image is not axis-aligned, so
+// its four corners are mapped, not two.
+func (c *Canvas) extend(x0, y0, x1, y1 float64) {
+	for _, p := range [4][2]float64{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}} {
+		c.ext.add(c.ctm.Apply(p[0], p[1]))
+	}
+}
+
+// extendPad is extend with the box grown by pad on every side: a stroke's ink
+// reaches past its path.
+func (c *Canvas) extendPad(x0, y0, x1, y1, pad float64) {
+	c.extend(min(x0, x1)-pad, min(y0, y1)-pad, max(x0, x1)+pad, max(y0, y1)+pad)
+}
+
+// Extent returns a box holding every mark drawn so far, in page space: the
+// canvas's own coordinates, not the current user space. ok is false while
+// nothing has been drawn. The box is tight for shapes and images. For text it
+// spans the advance horizontally and generously vertically, from half the font
+// size below the baseline to one and a half above, since glyph heights are not
+// known for every font.
+func (c *Canvas) Extent() (x0, y0, x1, y1 float64, ok bool) {
+	return c.ext.x0, c.ext.y0, c.ext.x1, c.ext.y1, c.ext.ok
+}
+
 // Mark is a position in a Canvas's content stream, taken by [Canvas.Mark] and
 // retracted to by [Canvas.Rewind]. A Mark is invalidated by [Canvas.Reset].
 type Mark struct {
@@ -47,6 +93,8 @@ type Mark struct {
 	links   int
 	glyphs  int
 	images  int
+	groups  int
+	ext     extent
 	curFont Font
 	curSize float64
 	ctm     Matrix
@@ -59,19 +107,20 @@ func (c *Canvas) Mark() Mark {
 	c.emit.Flush()
 	return Mark{
 		n: c.buf.Len(), fonts: len(c.used), links: len(c.links), glyphs: len(c.glyphs),
-		images:  len(c.images),
+		images: len(c.images), groups: len(c.groups), ext: c.ext,
 		curFont: c.curFont, curSize: c.curSize,
 		ctm: c.ctm, depth: c.depth,
 	}
 }
 
-// Rewind discards every operator, font and image reference, and link recorded
-// since m was taken. Passing a Mark from a different canvas or one taken before
-// a [Canvas.Reset] is a programming error and does nothing.
+// Rewind discards every operator, font, image and group reference, and link
+// recorded since m was taken, and the extent they added. Passing a Mark from a
+// different canvas or one taken before a [Canvas.Reset] is a programming error
+// and does nothing.
 func (c *Canvas) Rewind(m Mark) {
 	c.emit.Flush()
 	if m.n > c.buf.Len() || m.fonts > len(c.used) || m.links > len(c.links) || m.glyphs > len(c.glyphs) ||
-		m.images > len(c.images) {
+		m.images > len(c.images) || m.groups > len(c.groups) {
 		return
 	}
 	c.buf.Truncate(m.n)
@@ -79,17 +128,22 @@ func (c *Canvas) Rewind(m Mark) {
 	c.links = c.links[:m.links]
 	c.glyphs = c.glyphs[:m.glyphs]
 	c.images = c.images[:m.images]
+	c.groups = c.groups[:m.groups]
+	c.ext = m.ext
 	c.curFont = m.curFont
 	c.curSize = m.curSize
 	c.ctm = m.ctm
 	c.depth = m.depth
 }
 
-// Reset clears the content buffer, font and image sets for reuse on a new page.
+// Reset clears the content buffer, font, image and group sets for reuse on a
+// new page.
 func (c *Canvas) Reset(emitScratch []byte) error {
 	c.buf.Reset()
 	c.used = c.used[:0]
 	c.images = c.images[:0]
+	c.groups = c.groups[:0]
+	c.ext = extent{}
 	c.curFont = nil
 	c.curSize = 0
 	c.links = c.links[:0]
@@ -205,10 +259,15 @@ func (c *Canvas) Text(x, y float64, s string, col color.Color) {
 	c.emit.Real(x)
 	c.emit.Real(y)
 	c.emit.Ident("Td")
-	c.emit.StringBytes(c.encode(s, num-1))
+	codes, adv := c.encode(s, num-1)
+	c.emit.StringBytes(codes)
 	c.emit.Ident("Tj")
 	c.emit.Ident("ET")
 	c.emit.EOL()
+	if adv > 0 {
+		// Glyph heights are not known for every font; see Extent.
+		c.extend(x, y-0.5*c.curSize, x+adv*c.curSize, y+1.5*c.curSize)
+	}
 }
 
 // TextRight draws s right-aligned so its rendered box ends at xRight.
@@ -220,10 +279,12 @@ func (c *Canvas) TextRight(xRight, y float64, s string, col color.Color) {
 }
 
 // encode converts s to the current font's byte codes, recording what an
-// embedded font was asked to draw. fontIdx is the font's index in c.used.
-func (c *Canvas) encode(s string, fontIdx int) []byte {
+// embedded font was asked to draw, and returns them with the text's advance in
+// ems. fontIdx is the font's index in c.used.
+func (c *Canvas) encode(s string, fontIdx int) (codes []byte, adv float64) {
 	c.enc = c.enc[:0]
 	f := c.curFont
+	upem := float64(f.UnitsPerEm())
 	if _, embedded := f.(sfnt.Source); !embedded {
 		for _, r := range s {
 			g := f.GlyphID(r)
@@ -233,15 +294,17 @@ func (c *Canvas) encode(s string, fontIdx int) []byte {
 				g = '?'
 			}
 			c.enc = append(c.enc, byte(g))
+			adv += float64(f.GlyphAdvance(g)) / upem
 		}
-		return c.enc
+		return c.enc, adv
 	}
 	for _, r := range s {
 		g := f.GlyphID(r)
 		c.enc = append(c.enc, byte(g>>8), byte(g))
 		c.glyphs = append(c.glyphs, GlyphUse{Font: uint16(fontIdx), Glyph: g, Rune: r})
+		adv += float64(f.GlyphAdvance(g)) / upem
 	}
-	return c.enc
+	return c.enc, adv
 }
 
 // Glyphs returns what the page's embedded fonts were asked to draw.
@@ -264,6 +327,17 @@ func (c *Canvas) Line(x0, y0, x1, y1, w float64, col color.Color) {
 	c.emit.Ident("l")
 	c.emit.Ident("S")
 	c.emit.EOL()
+	c.extendPad(x0, y0, x1, y1, strokePad(w, math.Sqrt2))
+}
+
+// strokePad returns how far past its path a stroke of width w may reach when
+// its corners or caps reach reach half-widths out. A zero width is PDF's
+// thinnest line, one device pixel, padded as a point.
+func strokePad(w, reach float64) float64 {
+	if w <= 0 {
+		w = 1
+	}
+	return w / 2 * reach
 }
 
 // FillRect fills the rectangle at (x,y) of size w×h with col.
@@ -280,6 +354,7 @@ func (c *Canvas) FillRect(x, y, w, h float64, col color.Color) {
 	c.emit.Ident("re")
 	c.emit.Ident("f")
 	c.emit.EOL()
+	c.extend(x, y, x+w, y+h)
 }
 
 // Link marks the rectangle at (x,y) of size w×h as a hyperlink to uri. An
@@ -289,6 +364,13 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	if uri == "" {
 		return
 	}
+	ln := c.link(x, y, w, h)
+	ln.URI = append(ln.URI, uri...)
+}
+
+// link records the rectangle at (x,y) of size w×h as a link area and returns
+// it for the caller to append its URI to.
+func (c *Canvas) link(x, y, w, h float64) *Link {
 	// An annotation is measured in page space and knows nothing of the
 	// transform the content was drawn under
 	x0, y0 := c.ctm.Apply(x, y)
@@ -299,7 +381,7 @@ func (c *Canvas) Link(x, y, w, h float64, uri string) {
 	bot, top := min(y0, y1, y2, y3), max(y0, y1, y2, y3)
 	ln := internal.SliceReclaim(&c.links)
 	*ln = Link{X: lo, Y: bot, W: hi - lo, H: top - bot, URI: ln.URI[:0]}
-	ln.URI = append(ln.URI, uri...)
+	return ln
 }
 
 // Image draws img stretched over the rectangle at (x,y) of size w×h,
@@ -326,7 +408,64 @@ func (c *Canvas) Image(x, y, w, h float64, img Image) {
 	c.emit.NameNum("Im", int64(num))
 	c.emit.Ident("Do")
 	c.Restore(s)
+	c.extend(x, y, x+w, y+h)
 }
+
+// Place draws src with its origin at (x, y): whatever was drawn on src, text,
+// shapes, images and canvases placed on it, appears here as it appears there,
+// moved. A nil src is ignored; placing a canvas on itself fails c.
+//
+// src is written to the document once, as a Form XObject, however many times
+// and on however many pages it is placed: that is what makes a letterhead or
+// a footer cost its drawing once rather than once per page. Canvases are told
+// apart by pointer. src must be finished before it is placed, since its
+// extent and links are read here, and must not change until the document is
+// written, since its drawing is read then.
+//
+// A link on src cannot travel inside the Form XObject, annotations belonging
+// to pages, so it is copied onto c where src lands.
+func (c *Canvas) Place(x, y float64, src *Canvas) {
+	if src == nil {
+		return
+	} else if src == c {
+		c.emit.Fail(errPlaceSelf)
+		return
+	} else if !src.ext.ok && len(src.links) == 0 {
+		return // Nothing to draw and nothing to copy.
+	}
+	s := c.Save()
+	c.Translate(x, y)
+	if x0, y0, x1, y1, ok := src.Extent(); ok {
+		// A canvas with nothing drawn would be an empty form: skip it.
+		num := c.ensureGroup(src)
+		c.emit.NameNum("Fm", int64(num))
+		c.emit.Ident("Do")
+		c.emit.EOL()
+		c.extend(x0, y0, x1, y1)
+	}
+	for i := range src.links {
+		ln := &src.links[i]
+		dst := c.link(ln.X, ln.Y, ln.W, ln.H)
+		dst.URI = append(dst.URI, ln.URI...)
+	}
+	c.Restore(s)
+}
+
+// ensureGroup registers src and returns its resource number (the N of /FmN).
+func (c *Canvas) ensureGroup(src *Canvas) int {
+	for i := range c.groups {
+		if c.groups[i] == src {
+			return i + 1
+		}
+	}
+	c.groups = append(c.groups, src)
+	return len(c.groups)
+}
+
+// Groups returns the canvases placed on this one in first-use order: the i-th
+// is resource /Fm<i+1> of its /XObject dictionary. The slice is the canvas's
+// own storage and stays valid until the next [Canvas.Reset].
+func (c *Canvas) Groups() []*Canvas { return c.groups }
 
 // isComparable reports whether == on img cannot panic. A pointer, which every
 // image/... type is, is decided by its type without allocating; a value type
@@ -377,6 +516,8 @@ func (c *Canvas) StrokeRect(x, y, w, h, lineWidth float64, col color.Color) {
 	c.emit.Ident("re")
 	c.emit.Ident("S")
 	c.emit.EOL()
+	// Its square corners are miter joins reaching √2 half-widths out.
+	c.extendPad(x, y, x+w, y+h, strokePad(lineWidth, math.Sqrt2))
 }
 
 // Bytes flushes and returns the content-stream bytes emitted so far.

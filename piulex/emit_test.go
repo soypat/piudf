@@ -303,6 +303,26 @@ func TestEmitterSetPos(t *testing.T) {
 	}
 }
 
+// TestEmitterNotReset pins an emitter that was never Reset failing on its first
+// write. With no buffer, every write finds it full and flushes to make room; a
+// flush with nothing buffered frees none, so without the error it spins.
+func TestEmitterNotReset(t *testing.T) {
+	for name, emit := range map[string]func(e *Emitter){
+		"Ident": func(e *Emitter) { e.Ident("Tj") },
+		"Int":   func(e *Emitter) { e.Int(42) },
+		"Real":  func(e *Emitter) { e.Real(1.5) },
+		"Name":  func(e *Emitter) { e.Name("Type") },
+		"Raw":   func(e *Emitter) { e.Raw([]byte("q")) },
+		"Pair":  func(e *Emitter) { e.Int(1); e.Ident("w") },
+	} {
+		var e Emitter
+		emit(&e)
+		if err := e.Err(); err != errEmitNoBuffer {
+			t.Errorf("%s: Err() = %v, want %v", name, err, errEmitNoBuffer)
+		}
+	}
+}
+
 func TestEmitterIdentRejectsIrregular(t *testing.T) {
 	var buf [MinEmitBuffer]byte
 	var e Emitter
